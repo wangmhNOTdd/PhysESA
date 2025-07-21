@@ -260,7 +260,7 @@ def create_3d_visualization(protein_df, ligand_df, complex_name="1a4k"):
 
 def load_metadata_info():
     """加载元数据信息"""
-    metadata_path = "datasets/pdbbind/metadata"
+    metadata_path = "./datasets/pdbbind/metadata"
     info = {}
     
     try:
