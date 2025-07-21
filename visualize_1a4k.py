@@ -65,27 +65,42 @@ def parse_pdb_file(pdb_file):
 
 def parse_sdf_ligand(sdf_file):
     """解析SDF文件，提取配体原子坐标"""
-    mol = Chem.MolFromMolFile(sdf_file)
-    if mol is None:
+    print(f"Debug: 正在解析SDF文件: {sdf_file}")
+    try:
+        mol = Chem.MolFromMolFile(sdf_file)
+        if mol is None:
+            print("Debug: RDKit无法解析SDF文件")
+            return None, None
+        
+        print(f"Debug: 成功加载分子，原子数: {mol.GetNumAtoms()}")
+        
+        # 获取3D坐标
+        if mol.GetNumConformers() == 0:
+            print("Debug: 分子没有3D坐标")
+            return None, None
+            
+        conf = mol.GetConformer()
+        atoms_data = []
+        
+        for atom in mol.GetAtoms():
+            pos = conf.GetAtomPosition(atom.GetIdx())
+            atoms_data.append({
+                'atom_idx': atom.GetIdx(),
+                'element': atom.GetSymbol(),
+                'x': pos.x,
+                'y': pos.y,
+                'z': pos.z,
+                'formal_charge': atom.GetFormalCharge(),
+                'hybridization': str(atom.GetHybridization()),
+            })
+        
+        df = pd.DataFrame(atoms_data)
+        print(f"Debug: 创建DataFrame，形状: {df.shape}")
+        return df, mol
+        
+    except Exception as e:
+        print(f"Debug: SDF解析异常: {e}")
         return None, None
-    
-    # 获取3D坐标
-    conf = mol.GetConformer()
-    atoms_data = []
-    
-    for atom in mol.GetAtoms():
-        pos = conf.GetAtomPosition(atom.GetIdx())
-        atoms_data.append({
-            'atom_idx': atom.GetIdx(),
-            'element': atom.GetSymbol(),
-            'x': pos.x,
-            'y': pos.y,
-            'z': pos.z,
-            'formal_charge': atom.GetFormalCharge(),
-            'hybridization': str(atom.GetHybridization()),
-        })
-    
-    return pd.DataFrame(atoms_data), mol
 
 def create_3d_visualization(protein_df, ligand_df, complex_name="1a4k"):
     """创建3D可视化图表"""
@@ -191,8 +206,12 @@ def create_3d_visualization(protein_df, ligand_df, complex_name="1a4k"):
     
     # 3. 配体结构视图
     if not ligand_df.empty:
+        print(f"Debug: 配体DataFrame形状: {ligand_df.shape}")
+        print(f"Debug: 配体元素: {ligand_df['element'].unique()}")
+        
         for element in ligand_df['element'].unique():
             element_data = ligand_df[ligand_df['element'] == element]
+            print(f"Debug: 元素{element}有{len(element_data)}个原子")
             
             fig.add_trace(
                 go.Scatter3d(
@@ -201,20 +220,34 @@ def create_3d_visualization(protein_df, ligand_df, complex_name="1a4k"):
                     z=element_data['z'],
                     mode='markers',
                     marker=dict(
-                        size=10,
+                        size=12,
                         color=ATOM_COLORS.get(element, '#808080'),
-                        opacity=0.9,
-                        line=dict(width=2, color='black')
+                        opacity=1.0,
+                        line=dict(width=3, color='black')
                     ),
                     name=f'配体-{element}',
                     text=[f'原子: {element}<br>索引: {idx}<br>坐标: ({x:.2f}, {y:.2f}, {z:.2f})' 
                           for idx, x, y, z in 
                           zip(element_data['atom_idx'], element_data['x'], 
                               element_data['y'], element_data['z'])],
-                    hovertemplate='%{text}<extra></extra>'
+                    hovertemplate='%{text}<extra></extra>',
+                    showlegend=True
                 ),
                 row=2, col=1
             )
+    else:
+        print("Debug: 配体DataFrame为空")
+        # 如果配体为空，添加一个空的占位符
+        fig.add_trace(
+            go.Scatter3d(
+                x=[0], y=[0], z=[0],
+                mode='markers',
+                marker=dict(size=0, opacity=0),
+                name='无配体数据',
+                showlegend=False
+            ),
+            row=2, col=1
+        )
     
     # 4. 原子密度分布
     all_atoms = []
@@ -311,9 +344,10 @@ def main():
     # 解析配体结构
     try:
         ligand_df, mol = parse_sdf_ligand(sdf_file)
-        if ligand_df is not None:
+        if ligand_df is not None and not ligand_df.empty:
             print(f"✓ 配体原子数量: {len(ligand_df)}")
             print(f"  - 元素类型: {', '.join(ligand_df['element'].unique())}")
+            print(f"  - 坐标范围: X({ligand_df['x'].min():.2f}-{ligand_df['x'].max():.2f}), Y({ligand_df['y'].min():.2f}-{ligand_df['y'].max():.2f}), Z({ligand_df['z'].min():.2f}-{ligand_df['z'].max():.2f})")
         else:
             print("✗ 配体解析失败")
             ligand_df = pd.DataFrame()
