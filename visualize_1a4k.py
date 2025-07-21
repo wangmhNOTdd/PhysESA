@@ -15,8 +15,12 @@ import os
 import json
 
 # 定义原子颜色方案 (CPK颜色)
-ATOM_COLORS = {
-    'H': '#FFFFFF',   # 白色
+ATOM_COLORS =    # 加载元数据
+    metadata = load_metadata_info()
+    print(f"\n=== 复合物信息 ===")
+    print(f"PDB ID: {complex_id}")
+    print(f"结合亲和力: {metadata.get('affinity', 'Unknown')} (pKd)")
+    print(f"配体SMILES: {metadata.get('smiles', 'Unknown')[:50]}..." if len(str(metadata.get('smiles', 'Unknown'))) > 50 else f"配体SMILES: {metadata.get('smiles', 'Unknown')}")  'H': '#FFFFFF',   # 白色
     'C': '#909090',   # 灰色
     'N': '#3050F8',   # 蓝色
     'O': '#FF0D0D',   # 红色
@@ -281,11 +285,12 @@ def load_metadata_info():
 
 def main():
     """主函数"""
-    print("=== PDBbind 1a4k 复合物3D可视化分析 ===\n")
+    print("=== PDBbind 1a28 复合物3D可视化分析 ===\n")
     
-    # 数据文件路径
-    pdb_file = "./datasets/pdbbind/pdb_files/1a4k/1a4k.pdb"
-    sdf_file = "./datasets/pdbbind/pdb_files/1a4k/1a4k_ligand.sdf"
+    # 数据文件路径 - 更换为1a28复合物
+    pdb_file = "./datasets/pdbbind/pdb_files/1a28/1a28.pdb"
+    sdf_file = "./datasets/pdbbind/pdb_files/1a28/1a28_ligand.sdf"
+    complex_id = "1a28"
     
     # 检查文件存在性
     if not os.path.exists(pdb_file):
