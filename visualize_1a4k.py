@@ -284,8 +284,8 @@ def main():
     print("=== PDBbind 1a4k 复合物3D可视化分析 ===\n")
     
     # 数据文件路径
-    pdb_file = "datasets/pdbbind/pdb_files/1a4k/1a4k.pdb"
-    sdf_file = "datasets/pdbbind/pdb_files/1a4k/1a4k_ligand.sdf"
+    pdb_file = "./datasets/pdbbind/pdb_files/1a4k/1a4k.pdb"
+    sdf_file = "./datasets/pdbbind/pdb_files/1a4k/1a4k_ligand.sdf"
     
     # 检查文件存在性
     if not os.path.exists(pdb_file):
