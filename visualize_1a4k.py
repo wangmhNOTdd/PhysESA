@@ -199,13 +199,13 @@ def create_3d_visualization(protein_df, ligand_df, complex_name="1a4k"):
                     x=element_data['x'],
                     y=element_data['y'],
                     z=element_data['z'],
-                    mode='markers+lines',
+                    mode='markers',
                     marker=dict(
-                        size=8,
+                        size=10,
                         color=ATOM_COLORS.get(element, '#808080'),
-                        opacity=0.9
+                        opacity=0.9,
+                        line=dict(width=2, color='black')
                     ),
-                    line=dict(width=3, color='gray'),
                     name=f'配体-{element}',
                     text=[f'原子: {element}<br>索引: {idx}<br>坐标: ({x:.2f}, {y:.2f}, {z:.2f})' 
                           for idx, x, y, z in 

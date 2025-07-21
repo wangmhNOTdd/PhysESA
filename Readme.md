@@ -1,5 +1,20 @@
 # 蛋白质-小分子亲和力预测
 
+## 一些依赖
+Create conda environment: mamba create --name torch-esa python=3.11 -y mamba activate torch-esa
+
+Install PyTorch (2.5.1) mamba install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia -y
+
+Install PyTorch Geometric (2.6.1) and auxiliary packages mamba install pyg -c pyg -y mamba install pytorch-scatter -c pyg -y mamba install pytorch-sparse -c pyg -y mamba install pytorch-cluster -c pyg -y
+
+Install xformers (v0.0.28.post3) pip install xformers --index-url https://download.pytorch.org/whl/cu121
+
+Install Flash attention (v2.7.0.post2) pip install flash-attn --no-build-isolation
+
+Install specific version of transformers from huggingface pip install transformers==4.35.0 datasets==2.14.6 accelerate==0.24.1 These are required in order to make sure that some of the node-level/3D task adaptations work as intended.
+
+Install other requirements pip install pytorch_lightning pandas scikit-learn wandb rdkit bitsandbytes yacs admin_torch Cython ogb
+
 ## 数据集
 从PDBbind数据集建图：
 对整个复合物建一个图，节点为原子。
