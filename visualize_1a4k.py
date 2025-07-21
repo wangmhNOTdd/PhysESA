@@ -11,7 +11,6 @@ from plotly.subplots import make_subplots
 import plotly.express as px
 from Bio import PDB
 from rdkit import Chem
-from rdkit.Chem import rdMolDescs, rdMolTransforms
 import os
 import json
 
@@ -68,7 +67,7 @@ def parse_sdf_ligand(sdf_file):
     """解析SDF文件，提取配体原子坐标"""
     mol = Chem.MolFromMolFile(sdf_file)
     if mol is None:
-        return None
+        return None, None
     
     # 获取3D坐标
     conf = mol.GetConformer()
