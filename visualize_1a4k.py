@@ -15,12 +15,8 @@ import os
 import json
 
 # 定义原子颜色方案 (CPK颜色)
-ATOM_COLORS =    # 加载元数据
-    metadata = load_metadata_info()
-    print(f"\n=== 复合物信息 ===")
-    print(f"PDB ID: {complex_id}")
-    print(f"结合亲和力: {metadata.get('affinity', 'Unknown')} (pKd)")
-    print(f"配体SMILES: {metadata.get('smiles', 'Unknown')[:50]}..." if len(str(metadata.get('smiles', 'Unknown'))) > 50 else f"配体SMILES: {metadata.get('smiles', 'Unknown')}")  'H': '#FFFFFF',   # 白色
+ATOM_COLORS = {
+    'H': '#FFFFFF',   # 白色
     'C': '#909090',   # 灰色
     'N': '#3050F8',   # 蓝色
     'O': '#FF0D0D',   # 红色
@@ -262,7 +258,7 @@ def create_3d_visualization(protein_df, ligand_df, complex_name="1a4k"):
     
     return fig
 
-def load_metadata_info():
+def load_metadata_info(complex_id):
     """加载元数据信息"""
     metadata_path = "./datasets/pdbbind/metadata"
     info = {}
@@ -271,12 +267,12 @@ def load_metadata_info():
         # 亲和力数据
         with open(f"{metadata_path}/affinities.json", 'r') as f:
             affinities = json.load(f)
-            info['affinity'] = affinities.get('1a4k', 'Unknown')
+            info['affinity'] = affinities.get(complex_id, 'Unknown')
         
         # SMILES数据
         with open(f"{metadata_path}/lig_smiles.json", 'r') as f:
             smiles = json.load(f)
-            info['smiles'] = smiles.get('1a4k', 'Unknown')
+            info['smiles'] = smiles.get(complex_id, 'Unknown')
     except:
         info['affinity'] = 'Unknown'
         info['smiles'] = 'Unknown'
@@ -288,9 +284,9 @@ def main():
     print("=== PDBbind 1a28 复合物3D可视化分析 ===\n")
     
     # 数据文件路径 - 更换为1a28复合物
-    pdb_file = "./datasets/pdbbind/pdb_files/1a28/1a28.pdb"
-    sdf_file = "./datasets/pdbbind/pdb_files/1a28/1a28_ligand.sdf"
     complex_id = "1a28"
+    pdb_file = f"./datasets/pdbbind/pdb_files/{complex_id}/{complex_id}.pdb"
+    sdf_file = f"./datasets/pdbbind/pdb_files/{complex_id}/{complex_id}_ligand.sdf"
     
     # 检查文件存在性
     if not os.path.exists(pdb_file):
@@ -328,11 +324,11 @@ def main():
         mol = None
     
     # 加载元数据
-    metadata = load_metadata_info()
+    metadata = load_metadata_info(complex_id)
     print(f"\n=== 复合物信息 ===")
-    print(f"PDB ID: 1a4k")
+    print(f"PDB ID: {complex_id}")
     print(f"结合亲和力: {metadata['affinity']} (pKd)")
-    print(f"配体SMILES: {metadata['smiles'][:50]}..." if len(metadata['smiles']) > 50 else f"配体SMILES: {metadata['smiles']}")
+    print(f"配体SMILES: {metadata['smiles'][:50]}..." if len(str(metadata['smiles'])) > 50 else f"配体SMILES: {metadata['smiles']}")
     
     # 计算一些统计信息
     if not protein_df.empty and not ligand_df.empty:
@@ -348,10 +344,10 @@ def main():
     
     # 创建可视化
     print("\n正在生成3D可视化...")
-    fig = create_3d_visualization(protein_df, ligand_df, "1a4k")
+    fig = create_3d_visualization(protein_df, ligand_df, complex_id)
     
     # 保存图表
-    output_file = "1a4k_3d_visualization.html"
+    output_file = f"{complex_id}_3d_visualization.html"
     fig.write_html(output_file)
     print(f"✓ 3D可视化已保存到: {output_file}")
     
