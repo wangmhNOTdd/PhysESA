@@ -97,6 +97,8 @@ class MaskedSelfAttention(nn.Module):
     
     def _standard_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """标准注意力实现作为回退"""
+        batch_size, seq_len = q.shape[:2]
+        
         # 转换为标准的多头注意力格式: [batch_size, num_heads, seq_len, head_dim]
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -107,7 +109,14 @@ class MaskedSelfAttention(nn.Module):
         
         # 应用掩码
         if mask is not None:
-            mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            # 处理不同的遮罩形状
+            if mask.dim() == 2:  # [seq_len, seq_len]
+                # ESA边邻接遮罩的情况
+                mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+                mask = mask.expand(batch_size, self.num_heads, -1, -1)  # [batch_size, num_heads, seq_len, seq_len]
+            elif mask.dim() == 3:  # [batch_size, seq_len, seq_len]
+                mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # [batch_size, num_heads, seq_len, seq_len]
+            
             attn_weights = attn_weights.masked_fill(mask == 0, float('-inf'))
         
         # Softmax归一化
@@ -428,3 +437,6 @@ if __name__ == "__main__":
             print(f"测试时出错: {e}")
     else:
         print("测试数据不存在，跳过前向传播测试")
+
+# 为了向后兼容，提供别名
+PhysESA = SimplePhysESA
