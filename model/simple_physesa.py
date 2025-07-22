@@ -87,7 +87,7 @@ class MaskedSelfAttention(nn.Module):
             out = self._standard_attention(q, k, v, mask)
         
         # 重塑输出并应用输出投影
-        out = out.view(batch_size, seq_len, embed_dim)
+        out = out.reshape(batch_size, seq_len, embed_dim)  # 使用reshape而不是view
         out = self.out_proj(out)
         
         if batch_size == 1:
