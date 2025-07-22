@@ -1,6 +1,7 @@
 """
 阶段一：简化的PhysESA模型实现
 基于ESA架构，只使用MAB层进行局部相互作用学习
+优化版本：使用Flash Attention提升内存效率
 """
 
 import torch
@@ -9,9 +10,19 @@ import torch.nn.functional as F
 from torch_geometric.data import Data, Batch
 from torch_geometric.utils import to_dense_batch
 from typing import Dict, Optional, Tuple
+import math
+
+# 尝试导入Flash Attention
+try:
+    from flash_attn import flash_attn_func
+    FLASH_ATTN_AVAILABLE = True
+    print("[信息] Flash Attention 可用，将使用优化的注意力实现")
+except ImportError:
+    FLASH_ATTN_AVAILABLE = False
+    print("[警告] Flash Attention 未安装，将使用标准注意力实现")
 
 class MaskedSelfAttention(nn.Module):
-    """掩码自注意力模块 - 简化版本"""
+    """掩码自注意力模块 - Flash Attention优化版本"""
     
     def __init__(
         self, 
@@ -23,6 +34,7 @@ class MaskedSelfAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.dropout_p = dropout
         
         assert self.head_dim * num_heads == embed_dim
         
@@ -36,6 +48,8 @@ class MaskedSelfAttention(nn.Module):
         
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
+        使用Flash Attention的前向传播（如果可用且条件满足）
+        
         Args:
             x: [batch_size, seq_len, embed_dim] 或 [seq_len, embed_dim]
             mask: [batch_size, seq_len, seq_len] 注意力掩码
@@ -46,9 +60,47 @@ class MaskedSelfAttention(nn.Module):
         batch_size, seq_len, embed_dim = x.shape
         
         # 计算Q, K, V
-        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        q = self.q_proj(x)  # [batch_size, seq_len, embed_dim]
+        k = self.k_proj(x)  # [batch_size, seq_len, embed_dim]
+        v = self.v_proj(x)  # [batch_size, seq_len, embed_dim]
+        
+        # 重塑为多头格式
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        
+        # 根据条件选择注意力实现
+        use_flash = (FLASH_ATTN_AVAILABLE and 
+                    x.device.type == 'cuda' and 
+                    x.dtype in [torch.float16, torch.bfloat16] and
+                    seq_len <= 8192 and  # Flash Attention 序列长度限制
+                    mask is None)  # 目前跳过掩码以使用Flash Attention
+        
+        if use_flash:
+            # 使用Flash Attention
+            out = flash_attn_func(
+                q, k, v, 
+                dropout_p=self.dropout_p if self.training else 0.0
+            )
+        else:
+            # 使用标准注意力实现
+            out = self._standard_attention(q, k, v, mask)
+        
+        # 重塑输出并应用输出投影
+        out = out.view(batch_size, seq_len, embed_dim)
+        out = self.out_proj(out)
+        
+        if batch_size == 1:
+            out = out.squeeze(0)  # 移除batch维度
+            
+        return out
+    
+    def _standard_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """标准注意力实现作为回退"""
+        # 转换为标准的多头注意力格式: [batch_size, num_heads, seq_len, head_dim]
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
         
         # 计算注意力分数
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
@@ -64,12 +116,9 @@ class MaskedSelfAttention(nn.Module):
         
         # 计算输出
         out = torch.matmul(attn_weights, v)
-        out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, embed_dim)
-        out = self.out_proj(out)
+        # 转换回: [batch_size, seq_len, num_heads, head_dim]
+        out = out.transpose(1, 2)
         
-        if batch_size == 1:
-            out = out.squeeze(0)  # 移除batch维度
-            
         return out
 
 class MABLayer(nn.Module):
@@ -229,28 +278,59 @@ class SimplePhysESA(nn.Module):
     ) -> torch.Tensor:
         """
         创建边邻接掩码：两条边共享一个节点时，它们是邻接的
+        内存友好的版本：对于大图使用分块计算
         """
-        # 获取所有边的起点和终点
+        device = edge_index.device
+        
+        # 对于小图，使用向量化版本
+        if num_edges <= 4000:
+            return self._create_mask_vectorized(edge_index, num_edges)
+        
+        # 对于大图，使用分块版本以节省内存
+        return self._create_mask_chunked(edge_index, num_edges)
+    
+    def _create_mask_vectorized(self, edge_index: torch.Tensor, num_edges: int) -> torch.Tensor:
+        """向量化版本的掩码计算"""
         src_nodes = edge_index[0]  # [num_edges]
         dst_nodes = edge_index[1]  # [num_edges]
         
-        # 创建掩码矩阵 [num_edges, num_edges]
-        mask = torch.zeros(num_edges, num_edges, dtype=torch.bool, device=edge_index.device)
+        # 向量化计算：检查所有边对是否共享节点
+        src_src_match = src_nodes.unsqueeze(1) == src_nodes.unsqueeze(0)  # [num_edges, num_edges]
+        src_dst_match = src_nodes.unsqueeze(1) == dst_nodes.unsqueeze(0)  
+        dst_src_match = dst_nodes.unsqueeze(1) == src_nodes.unsqueeze(0)  
+        dst_dst_match = dst_nodes.unsqueeze(1) == dst_nodes.unsqueeze(0)  
         
-        # 两条边邻接的条件：共享至少一个节点
-        for i in range(num_edges):
-            for j in range(num_edges):
-                if i != j:
-                    # 检查是否共享节点
-                    src_i, dst_i = src_nodes[i], dst_nodes[i]
-                    src_j, dst_j = src_nodes[j], dst_nodes[j]
-                    
-                    if src_i == src_j or src_i == dst_j or dst_i == src_j or dst_i == dst_j:
-                        mask[i, j] = True
-        
-        # 自连接设为True
+        # 任何一种匹配都表示边邻接
+        mask = src_src_match | src_dst_match | dst_src_match | dst_dst_match
         mask.fill_diagonal_(True)
         
+        return mask
+    
+    def _create_mask_chunked(self, edge_index: torch.Tensor, num_edges: int, chunk_size: int = 1000) -> torch.Tensor:
+        """分块计算版本的掩码计算"""
+        device = edge_index.device
+        src_nodes = edge_index[0]
+        dst_nodes = edge_index[1]
+        
+        mask = torch.zeros(num_edges, num_edges, dtype=torch.bool, device=device)
+        
+        # 分块计算以节省内存
+        for i in range(0, num_edges, chunk_size):
+            end_i = min(i + chunk_size, num_edges)
+            
+            for j in range(0, num_edges, chunk_size):
+                end_j = min(j + chunk_size, num_edges)
+                
+                # 计算当前块的掩码
+                src_i = src_nodes[i:end_i].unsqueeze(1)  # [chunk_i, 1]
+                dst_i = dst_nodes[i:end_i].unsqueeze(1)  # [chunk_i, 1]
+                src_j = src_nodes[j:end_j].unsqueeze(0)  # [1, chunk_j]
+                dst_j = dst_nodes[j:end_j].unsqueeze(0)  # [1, chunk_j]
+                
+                chunk_mask = (src_i == src_j) | (src_i == dst_j) | (dst_i == src_j) | (dst_i == dst_j)
+                mask[i:end_i, j:end_j] = chunk_mask
+        
+        mask.fill_diagonal_(True)
         return mask
     
     def prepare_edge_features(self, data: Data) -> torch.Tensor:
