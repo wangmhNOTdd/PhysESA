@@ -324,6 +324,29 @@ if __name__ == "__main__":
             dims = builder.get_feature_dimensions()
             print(f"特征维度: {dims}")
             
+            # 检查边特征的有效性
+            print(f"\n边特征检查:")
+            print(f"  边特征形状: {data.edge_attr.shape}")
+            print(f"  边特征范围: min={data.edge_attr.min().item():.4f}, max={data.edge_attr.max().item():.4f}")
+            
+            # 检查前几条边的距离和特征
+            print(f"\n前5条边的信息:")
+            for i in range(min(5, data.edge_index.shape[1])):
+                src_idx = data.edge_index[0, i].item()
+                tgt_idx = data.edge_index[1, i].item()
+                
+                # 计算真实距离
+                src_pos = data.pos[src_idx]
+                tgt_pos = data.pos[tgt_idx]
+                true_distance = torch.norm(tgt_pos - src_pos).item()
+                
+                # 获取边特征（高斯基函数的响应）
+                edge_features = data.edge_attr[i]
+                
+                print(f"  边{i}: 原子{src_idx}->{tgt_idx}, "
+                      f"距离={true_distance:.3f}Å, "
+                      f"高斯特征前3维={edge_features[:3].tolist()}")
+            
             # 检查一些配体原子的特征
             ligand_start_idx = data.num_protein_atoms
             if data.num_ligand_atoms > 0:
@@ -340,6 +363,16 @@ if __name__ == "__main__":
                     print(f"  原子{i}: 类型={atom_names[atom_type]}, "
                           f"氢原子数={hydrogen_count:.0f}, "
                           f"重原子邻居数={heavy_neighbors:.0f}")
+            
+            # 验证高斯基函数是否工作正常
+            print(f"\n高斯基函数测试:")
+            test_distances = torch.tensor([1.0, 2.5, 4.0, 5.0])
+            for dist in test_distances:
+                gaussian_features = builder.gaussian_basis_functions(dist.unsqueeze(0))[0]
+                max_response_idx = int(torch.argmax(gaussian_features).item())
+                max_response = gaussian_features[max_response_idx].item()
+                corresponding_center = builder.gaussian_centers[max_response_idx].item()
+                print(f"  距离{dist:.1f}Å -> 最强响应在中心{corresponding_center:.2f}Å (响应值={max_response:.3f})")
             
         except Exception as e:
             print(f"构建图时出错: {e}")
