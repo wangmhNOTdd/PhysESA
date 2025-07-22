@@ -161,7 +161,6 @@ config.json
 secrets.json
 
 # 实验记录
-experiments/
 runs/
 mlruns/
 

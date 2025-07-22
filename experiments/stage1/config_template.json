@@ -1,0 +1,42 @@
+{
+  "_comment": "阶段一ESA模型配置文件",
+  
+  "data_config": {
+    "cutoff_radius": 5.0,
+    "num_gaussians": 16,
+    "split_type": "scaffold_split"
+  },
+  
+  "model_config": {
+    "graph_dim": 128,
+    "hidden_dims": [128, 128],
+    "num_heads": 8,
+    "num_sabs": 0,
+    "layer_types": ["M", "M"],
+    "apply_attention_on": "edge",
+    "sab_dropout": 0.1,
+    "mab_dropout": 0.1,
+    "pma_dropout": 0.1,
+    "use_mlps": true,
+    "mlp_hidden_size": 128,
+    "mlp_type": "standard",
+    "norm_type": "layer_norm"
+  },
+  
+  "training_config": {
+    "batch_size": 8,
+    "learning_rate": 1e-4,
+    "max_epochs": 100,
+    "patience": 15,
+    "weight_decay": 1e-5,
+    "grad_clip": 1.0,
+    "use_fp16": true,
+    "num_workers": 4
+  },
+  
+  "hardware_config": {
+    "accelerator": "auto",
+    "devices": 1,
+    "precision": 16
+  }
+}
