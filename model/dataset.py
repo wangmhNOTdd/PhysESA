@@ -87,17 +87,26 @@ class PDBBindDataset(Dataset):
         return sorted(ids)
     
     def _filter_valid_complexes(self) -> List[str]:
-        """过滤存在PDB和SDF文件的有效复合物"""
+        """过滤存在PDB和SDF文件的有效复合物，并测试是否能够构建图"""
         valid_ids = []
         
         for complex_id in self.complex_ids:
             pdb_file = self._get_pdb_file_path(complex_id)
             sdf_file = self._get_sdf_file_path(complex_id)
             
-            if os.path.exists(pdb_file) and os.path.exists(sdf_file):
-                valid_ids.append(complex_id)
-            else:
+            # 检查文件是否存在
+            if not (os.path.exists(pdb_file) and os.path.exists(sdf_file)):
                 print(f"跳过复合物 {complex_id}: 文件缺失")
+                continue
+            
+            # 测试是否能够构建分子图
+            try:
+                # 快速测试构建图（不保存结果）
+                self.graph_builder.build_graph(complex_id, pdb_file, sdf_file)
+                valid_ids.append(complex_id)
+            except Exception as e:
+                print(f"跳过复合物 {complex_id}: 图构建失败 - {e}")
+                continue
                 
         return valid_ids
     
@@ -128,20 +137,8 @@ class PDBBindDataset(Dataset):
         pdb_file = self._get_pdb_file_path(complex_id)
         sdf_file = self._get_sdf_file_path(complex_id)
         
-        # 构建分子图
-        try:
-            data = self.graph_builder.build_graph(complex_id, pdb_file, sdf_file)
-        except Exception as e:
-            print(f"构建图失败 {complex_id}: {e}")
-            # 返回一个虚拟的数据点
-            dims = self.graph_builder.get_feature_dimensions()
-            data = Data(
-                x=torch.zeros(1, dims['node_dim']),
-                edge_index=torch.zeros(2, 0, dtype=torch.long),
-                edge_attr=torch.zeros(0, dims['edge_dim']),
-                pos=torch.zeros(1, 3),
-                complex_id=complex_id
-            )
+        # 构建分子图（已经在初始化时验证过，理论上应该成功）
+        data = self.graph_builder.build_graph(complex_id, pdb_file, sdf_file)
         
         # 获取标签
         affinity = self._get_affinity(complex_id)

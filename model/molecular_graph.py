@@ -232,38 +232,35 @@ class MolecularGraphBuilder:
         )
         atom_features = self.get_atom_features(protein_df, ligand_df)
         
-        # 计算原子间距离矩阵
+        # 计算原子间距离矩阵 - 优化版本
         num_atoms = len(all_atoms_df)
-        edge_indices = []
-        edge_features = []
         
-        for i in range(num_atoms):
-            for j in range(i + 1, num_atoms):  # 只考虑上三角，无向图
-                pos_i = positions[i]
-                pos_j = positions[j]
-                distance = torch.norm(pos_j - pos_i)
-                
-                if distance <= self.cutoff_radius:
-                    # 添加双向边 (i->j 和 j->i)
-                    edge_indices.extend([[i, j], [j, i]])
-                    
-                    # 使用高斯基函数扩展距离
-                    distance_features = self.gaussian_basis_functions(distance.unsqueeze(0))[0]
-                    
-                    # 对于无向图，两个方向的边特征相同
-                    edge_features.extend([distance_features, distance_features])
+        # 使用向量化计算距离矩阵
+        pos_expanded_i = positions.unsqueeze(1)  # [num_atoms, 1, 3]
+        pos_expanded_j = positions.unsqueeze(0)  # [1, num_atoms, 3]
+        distance_matrix = torch.norm(pos_expanded_i - pos_expanded_j, dim=2)  # [num_atoms, num_atoms]
         
-        if not edge_indices:
+        # 找到在截断半径内的原子对
+        mask = (distance_matrix <= self.cutoff_radius) & (distance_matrix > 0)  # 排除自身
+        edge_indices = torch.nonzero(mask, as_tuple=False)  # [num_edges, 2]
+        
+        if edge_indices.shape[0] == 0:
             raise ValueError(f"复合物 {complex_id} 没有找到任何相互作用边")
         
-        edge_index = torch.tensor(edge_indices, dtype=torch.long).t()  # [2, num_edges]
-        edge_attr = torch.stack(edge_features)  # [num_edges, num_gaussians]
+        # 获取对应的距离值
+        edge_distances = distance_matrix[mask]  # [num_edges]
+        
+        # 使用高斯基函数扩展距离特征
+        edge_features = self.gaussian_basis_functions(edge_distances)  # [num_edges, num_gaussians]
+        
+        # 转换为PyG格式
+        edge_index = edge_indices.t()  # [2, num_edges]
         
         # 构建PyTorch Geometric Data对象
         data = Data(
             x=atom_features,           # [num_atoms, atom_feature_dim] 
             edge_index=edge_index,     # [2, num_edges]
-            edge_attr=edge_attr,       # [num_edges, num_gaussians]
+            edge_attr=edge_features,   # [num_edges, num_gaussians]
             pos=positions,             # [num_atoms, 3]
             complex_id=complex_id,
             num_protein_atoms=len(protein_df),
