@@ -134,10 +134,11 @@ class PDBBindDataset(Dataset):
         except Exception as e:
             print(f"构建图失败 {complex_id}: {e}")
             # 返回一个虚拟的数据点
+            dims = self.graph_builder.get_feature_dimensions()
             data = Data(
-                x=torch.zeros(1, self.graph_builder.num_atom_types),
+                x=torch.zeros(1, dims['node_dim']),
                 edge_index=torch.zeros(2, 0, dtype=torch.long),
-                edge_attr=torch.zeros(0, self.graph_builder.num_gaussians),
+                edge_attr=torch.zeros(0, dims['edge_dim']),
                 pos=torch.zeros(1, 3),
                 complex_id=complex_id
             )
