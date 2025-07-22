@@ -41,7 +41,7 @@ class Trainer:
         self.device = device
         
         # 优化器和损失函数
-        self.optimizer = optim.Adam(
+        self.optimizer = torch.optim.Adam(
             model.parameters(), 
             lr=lr, 
             weight_decay=weight_decay
@@ -49,12 +49,14 @@ class Trainer:
         self.criterion = nn.MSELoss()
         
         # 学习率调度器
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=10, verbose=True
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=10
         )
         
         # 日志
         self.writer = SummaryWriter(log_dir)
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
         self.best_val_loss = float('inf')
         
         # 统计信息
@@ -73,6 +75,9 @@ class Trainer:
             if len(graphs) > 0:
                 graph = graphs[0]  # 取第一个图
                 target = targets[0].to(self.device)
+                
+                # 将图数据移动到正确的设备
+                graph = graph.to(self.device)
                 
                 # 前向传播
                 self.optimizer.zero_grad()
@@ -117,6 +122,9 @@ class Trainer:
                 if len(graphs) > 0:
                     graph = graphs[0]
                     target = targets[0].to(self.device)
+                    
+                    # 将图数据移动到正确的设备
+                    graph = graph.to(self.device)
                     
                     try:
                         prediction = self.model(graph)
@@ -171,9 +179,16 @@ class Trainer:
             # 学习率调度
             self.scheduler.step(val_loss)
             
-            # 记录训练损失
+            # 记录训练损失到tensorboard
             self.writer.add_scalar('Train/Loss', train_loss, epoch)
             self.writer.add_scalar('Train/LR', self.optimizer.param_groups[0]['lr'], epoch)
+            
+            # 记录日志信息到文件
+            log_file = os.path.join(self.log_dir, 'training_log.txt')
+            with open(log_file, 'a') as f:
+                f.write(f'Epoch {epoch}: Train Loss: {train_loss:.4f}, '
+                       f'Val Loss: {val_loss:.4f}, '
+                       f'LR: {self.optimizer.param_groups[0]["lr"]:.6f}\n')
             
             # 保存最佳模型
             if val_loss < self.best_val_loss:

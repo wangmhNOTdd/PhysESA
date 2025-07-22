@@ -193,11 +193,18 @@ def create_data_loaders(
         train_ids = all_ids[:n_train]
         val_ids = all_ids[n_train:n_train + n_val]
         test_ids = all_ids[n_train + n_val:]
+        
+        print(f"数据分割:")
+        print(f"  总复合物: {n_total}")
+        print(f"  训练集: {len(train_ids)}")
+        print(f"  验证集: {len(val_ids)}")
+        print(f"  测试集: {len(test_ids)}")
     
     # 创建数据集
     train_dataset = PDBBindDataset(
         data_root, complex_ids=train_ids, 
         cutoff_radius=cutoff_radius, num_gaussians=num_gaussians
+    )
     )
     
     val_dataset = PDBBindDataset(
