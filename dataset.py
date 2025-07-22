@@ -1,6 +1,9 @@
 """
 阶段一：PDBbind数据集加载器
 简化版本，支持批量加载和处理
+
+注意：此文件主要用于快速测试，实际阶段一训练请使用 prepare_stage1_data.py 
+生成预处理的数据文件，然后使用 experiments/stage1/train_stage1.py 进行训练
 """
 
 import os

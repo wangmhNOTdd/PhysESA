@@ -19,6 +19,86 @@ Install other requirements pip install pytorch_lightning pandas scikit-learn wan
 从PDBbind数据集建图：
 对整个复合物建一个图，节点为原子。
 可视化复合物中原子的3D位置。
+### pdbbind数据集目录：
+datasets
+└── pdbbind
+    ├── metadata
+    │   ├── affinities.json
+    │   ├── identity30_split.json
+    │   ├── identity60_split.json
+    │   ├── index
+    │   │   ├── 2019_index.lst
+    │   │   ├── INDEX_core_cluster.2013
+    │   │   ├── INDEX_core_data.2013
+    │   │   ├── INDEX_core_name.2013
+    │   │   ├── INDEX_general_NL.2019
+    │   │   ├── INDEX_general_PL.2019
+    │   │   ├── INDEX_general_PL_data.2019
+    │   │   ├── INDEX_general_PL_name.2019
+    │   │   ├── INDEX_general_PN.2019
+    │   │   ├── INDEX_general_PP.2019
+    │   │   ├── INDEX_refined_data.2019
+    │   │   ├── INDEX_refined_name.2019
+    │   │   ├── INDEX_refined_set.2019
+    │   │   └── INDEX_structure.2019
+    │   ├── lig_smiles.json
+    │   ├── readme
+    │   │   ├── PDBbind-101.txt
+    │   │   └── pdbbind_2019_intro.pdf
+    │   ├── scaffold_split.json
+    │   └── seqs.json
+    └── pdb_files
+        ├── 10gs
+        │   ├── 10gs.dssp
+        │   ├── 10gs.obj
+        │   ├── 10gs.pdb
+        │   ├── 10gs_base.obj
+        │   ├── 10gs_fixed.pdb
+        │   ├── 10gs_ligand.mol2
+        │   ├── 10gs_ligand.sdf
+        │   ├── 10gs_out.csv
+        │   └── 10gs_pocket.pdb
+        ├── 184l
+        │   ├── 184l.dssp
+        │   ├── 184l.obj
+        │   ├── 184l.pdb
+        │   ├── 184l_base.obj
+        │   ├── 184l_fixed.pdb
+        │   ├── 184l_ligand.mol2
+        │   ├── 184l_ligand.sdf
+        │   ├── 184l_out.csv
+        │   └── 184l_pocket.pdb
+        ├── 185l
+        │   ├── 185l.dssp
+        │   ├── 185l.obj
+        │   ├── 185l.pdb
+        │   ├── 185l_base.obj
+        │   ├── 185l_fixed.pdb
+        │   ├── 185l_ligand.mol2
+        │   ├── 185l_ligand.sdf
+        │   ├── 185l_out.csv
+        │   └── 185l_pocket.pdb
+        ├── 186l
+        │   ├── 186l.dssp
+        │   ├── 186l.obj
+        │   ├── 186l.pdb
+        │   ├── 186l_base.obj
+        │   ├── 186l_fixed.pdb
+        │   ├── 186l_ligand.mol2
+        │   ├── 186l_ligand.sdf
+        │   ├── 186l_out.csv
+        │   └── 186l_pocket.pdb
+        ├── 187l
+        │   ├── 187l.dssp
+        │   ├── 187l.obj
+        │   ├── 187l.pdb
+        │   ├── 187l_base.obj
+        │   ├── 187l_fixed.pdb
+        │   ├── 187l_ligand.mol2
+        │   ├── 187l_ligand.sdf
+        │   ├── 187l_out.csv
+        │   └── 187l_pocket.pdb
+        ...
 
 ## 辅助材料：ESA模型简介：
 

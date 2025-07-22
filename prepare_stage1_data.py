@@ -1,0 +1,350 @@
+"""
+阶段一数据预处理脚本
+简化特征，生成可训练的数据集文件
+"""
+
+import os
+import pickle
+import torch
+import json
+import numpy as np
+from torch_geometric.data import Data
+from typing import List, Dict, Tuple
+from tqdm import tqdm
+import argparse
+
+from molecular_graph import MolecularGraphBuilder, load_pdbbind_metadata
+
+
+class Stage1GraphBuilder(MolecularGraphBuilder):
+    """阶段一简化版图构建器"""
+    
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16):
+        super().__init__(cutoff_radius, num_gaussians)
+        # 阶段一：简化特征维度
+        # 原子特征：只使用原子类型独热编码 (10维)
+        self.atom_feature_dim = 10
+        
+    def get_atom_features(self, protein_df, ligand_df) -> torch.Tensor:
+        """
+        阶段一简化版：只使用原子类型特征
+        """
+        all_features = []
+        
+        # 处理蛋白质原子
+        for _, row in protein_df.iterrows():
+            # 只使用原子类型独热编码 (10维)
+            atom_type = self.get_atom_type_onehot(row['element'])
+            all_features.append(atom_type)
+        
+        # 处理配体原子
+        for _, row in ligand_df.iterrows():
+            # 只使用原子类型独热编码 (10维)
+            atom_type = self.get_atom_type_onehot(row['element'])
+            all_features.append(atom_type)
+        
+        return torch.tensor(np.array(all_features), dtype=torch.float32)
+    
+    def get_feature_dimensions(self) -> Dict[str, int]:
+        """返回阶段一的特征维度信息"""
+        return {
+            'node_dim': self.atom_feature_dim,  # 10维: 原子类型独热编码
+            'edge_dim': self.num_gaussians,     # 16维: 高斯基函数扩展距离
+            'pos_dim': 3
+        }
+
+
+def prepare_split_data(
+    data_root: str,
+    split_type: str = "scaffold_split",
+    max_samples_per_split: int = None
+) -> Tuple[List[str], List[str], List[str]]:
+    """
+    准备数据分割
+    
+    Args:
+        data_root: 数据根目录
+        split_type: 分割类型 ("scaffold_split", "identity30_split", "identity60_split")
+        max_samples_per_split: 每个分割的最大样本数（用于调试）
+    
+    Returns:
+        (train_ids, val_ids, test_ids)
+    """
+    metadata_path = os.path.join(data_root, 'metadata')
+    split_file = os.path.join(metadata_path, f'{split_type}.json')
+    
+    if os.path.exists(split_file):
+        print(f"使用预定义分割: {split_file}")
+        with open(split_file, 'r') as f:
+            split_data = json.load(f)
+        
+        train_ids = split_data.get('train', [])
+        val_ids = split_data.get('val', [])
+        test_ids = split_data.get('test', [])
+        
+        # 限制样本数量（用于调试）
+        if max_samples_per_split:
+            train_ids = train_ids[:max_samples_per_split]
+            val_ids = val_ids[:max_samples_per_split//4]  # 验证集较小
+            test_ids = test_ids[:max_samples_per_split//4]  # 测试集较小
+            
+    else:
+        print("使用简单的8:1:1分割")
+        # 扫描所有可用的复合物
+        pdb_files_dir = os.path.join(data_root, 'pdb_files')
+        all_ids = [d for d in os.listdir(pdb_files_dir) 
+                  if os.path.isdir(os.path.join(pdb_files_dir, d))]
+        
+        if max_samples_per_split:
+            all_ids = all_ids[:int(max_samples_per_split * 1.25)]  # 稍微多一点以保证足够的样本
+            
+        # 简单分割
+        n_total = len(all_ids)
+        n_train = int(0.8 * n_total)
+        n_val = int(0.1 * n_total)
+        
+        train_ids = all_ids[:n_train]
+        val_ids = all_ids[n_train:n_train + n_val]
+        test_ids = all_ids[n_train + n_val:]
+    
+    print(f"数据分割统计:")
+    print(f"  训练集: {len(train_ids)}")
+    print(f"  验证集: {len(val_ids)}")
+    print(f"  测试集: {len(test_ids)}")
+    
+    return train_ids, val_ids, test_ids
+
+
+def process_complex_list(
+    complex_ids: List[str],
+    data_root: str,
+    graph_builder: Stage1GraphBuilder,
+    metadata: Dict,
+    split_name: str
+) -> List[Tuple[Data, float, str]]:
+    """
+    处理复合物列表，返回有效的图数据
+    
+    Returns:
+        List of (graph_data, affinity, complex_id)
+    """
+    processed_data = []
+    
+    print(f"处理{split_name}数据...")
+    for complex_id in tqdm(complex_ids, desc=f"处理{split_name}"):
+        # 构建文件路径
+        pdb_file = os.path.join(data_root, 'pdb_files', complex_id, f'{complex_id}.pdb')
+        sdf_file = os.path.join(data_root, 'pdb_files', complex_id, f'{complex_id}_ligand.sdf')
+        
+        # 检查文件是否存在
+        if not (os.path.exists(pdb_file) and os.path.exists(sdf_file)):
+            print(f"跳过 {complex_id}: 文件缺失")
+            continue
+            
+        # 获取亲和力标签
+        if 'affinities' in metadata and complex_id in metadata['affinities']:
+            affinity = float(metadata['affinities'][complex_id])
+        else:
+            print(f"跳过 {complex_id}: 缺少亲和力数据")
+            continue
+            
+        # 尝试构建图
+        try:
+            graph_data = graph_builder.build_graph(complex_id, pdb_file, sdf_file)
+            processed_data.append((graph_data, affinity, complex_id))
+            
+        except Exception as e:
+            print(f"跳过 {complex_id}: 图构建失败 - {e}")
+            continue
+    
+    print(f"{split_name}有效样本数: {len(processed_data)}")
+    return processed_data
+
+
+def prepare_for_esa_training(graph_data: Data) -> Dict:
+    """
+    将图数据转换为ESA训练所需的格式
+    """
+    # 计算边的数量，用于后续的批处理
+    num_edges = graph_data.edge_index.shape[1]
+    
+    # 为ESA准备数据：每条边关联其两端的节点特征
+    edge_index = graph_data.edge_index
+    x = graph_data.x  # 节点特征
+    edge_attr = graph_data.edge_attr  # 边特征
+    
+    # ESA需要的格式：将每条边表示为 [src_node_feat, tgt_node_feat, edge_feat]
+    source_features = x[edge_index[0]]  # [num_edges, node_dim]
+    target_features = x[edge_index[1]]  # [num_edges, node_dim]
+    
+    # 拼接边表示：[src_feat, tgt_feat, edge_feat]
+    if edge_attr is not None:
+        edge_representations = torch.cat([source_features, target_features, edge_attr], dim=1)
+    else:
+        edge_representations = torch.cat([source_features, target_features], dim=1)
+    
+    return {
+        'edge_representations': edge_representations,  # [num_edges, feature_dim]
+        'edge_index': edge_index,  # [2, num_edges] 
+        'num_edges': num_edges,
+        'num_nodes': graph_data.x.shape[0],
+        'node_features': x,  # 保留原始节点特征以备用
+        'edge_features': edge_attr,  # 保留原始边特征
+        'pos': graph_data.pos,  # 原子坐标
+        'complex_id': graph_data.complex_id,
+        'num_protein_atoms': graph_data.num_protein_atoms,
+        'num_ligand_atoms': graph_data.num_ligand_atoms
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description='阶段一数据预处理')
+    parser.add_argument('--data_root', type=str, default='./datasets/pdbbind', 
+                       help='PDBbind数据集根目录')
+    parser.add_argument('--output_dir', type=str, default='./experiments/stage1',
+                       help='输出目录')
+    parser.add_argument('--split_type', type=str, default='scaffold_split',
+                       choices=['scaffold_split', 'identity30_split', 'identity60_split'],
+                       help='数据分割类型')
+    parser.add_argument('--cutoff_radius', type=float, default=5.0,
+                       help='原子相互作用截断半径')
+    parser.add_argument('--num_gaussians', type=int, default=16,
+                       help='高斯基函数数量')
+    parser.add_argument('--max_samples', type=int, default=None,
+                       help='每个分割的最大样本数（用于调试）')
+    parser.add_argument('--test_run', action='store_true',
+                       help='测试运行模式，只处理少量样本')
+    
+    args = parser.parse_args()
+    
+    # 测试模式
+    if args.test_run:
+        args.max_samples = 50
+        print("*** 测试运行模式：仅处理50个样本 ***")
+    
+    # 检查数据目录
+    if not os.path.exists(args.data_root):
+        raise ValueError(f"数据目录不存在: {args.data_root}")
+    
+    # 创建输出目录
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 初始化图构建器
+    graph_builder = Stage1GraphBuilder(
+        cutoff_radius=args.cutoff_radius,
+        num_gaussians=args.num_gaussians
+    )
+    
+    # 加载元数据
+    metadata_path = os.path.join(args.data_root, 'metadata')
+    metadata = load_pdbbind_metadata(metadata_path)
+    
+    # 准备数据分割
+    train_ids, val_ids, test_ids = prepare_split_data(
+        args.data_root, 
+        args.split_type,
+        args.max_samples
+    )
+    
+    # 处理各个数据集
+    datasets = {
+        'train': (train_ids, 'train'),
+        'valid': (val_ids, 'valid'),
+        'test': (test_ids, 'test')
+    }
+    
+    feature_stats = {}
+    
+    for split_name, (complex_ids, filename) in datasets.items():
+        if len(complex_ids) == 0:
+            print(f"警告: {split_name}集为空，跳过")
+            continue
+            
+        # 处理数据
+        processed_data = process_complex_list(
+            complex_ids, args.data_root, graph_builder, metadata, split_name
+        )
+        
+        if len(processed_data) == 0:
+            print(f"错误: {split_name}集没有有效数据")
+            continue
+        
+        # 转换为ESA格式并添加统计信息
+        esa_data = []
+        edge_counts = []
+        node_counts = []
+        affinities = []
+        
+        for graph_data, affinity, complex_id in processed_data:
+            esa_sample = prepare_for_esa_training(graph_data)
+            esa_sample['affinity'] = affinity
+            esa_data.append(esa_sample)
+            
+            # 收集统计信息
+            edge_counts.append(esa_sample['num_edges'])
+            node_counts.append(esa_sample['num_nodes'])
+            affinities.append(affinity)
+        
+        # 保存数据
+        output_file = os.path.join(args.output_dir, f'{filename}.pkl')
+        with open(output_file, 'wb') as f:
+            pickle.dump(esa_data, f)
+        
+        print(f"{split_name}数据已保存到: {output_file}")
+        
+        # 统计信息
+        feature_stats[split_name] = {
+            'num_samples': len(esa_data),
+            'edge_count_stats': {
+                'mean': np.mean(edge_counts),
+                'std': np.std(edge_counts),
+                'min': np.min(edge_counts),
+                'max': np.max(edge_counts)
+            },
+            'node_count_stats': {
+                'mean': np.mean(node_counts),
+                'std': np.std(node_counts),
+                'min': np.min(node_counts),
+                'max': np.max(node_counts)
+            },
+            'affinity_stats': {
+                'mean': np.mean(affinities),
+                'std': np.std(affinities),
+                'min': np.min(affinities),
+                'max': np.max(affinities)
+            }
+        }
+    
+    # 保存特征维度信息和统计信息
+    feature_dims = graph_builder.get_feature_dimensions()
+    
+    metadata_info = {
+        'feature_dimensions': feature_dims,
+        'dataset_stats': feature_stats,
+        'cutoff_radius': args.cutoff_radius,
+        'num_gaussians': args.num_gaussians,
+        'split_type': args.split_type,
+        'data_format': 'esa_edge_representations'
+    }
+    
+    with open(os.path.join(args.output_dir, 'metadata.json'), 'w') as f:
+        json.dump(metadata_info, f, indent=2, default=str)
+    
+    print("\n=== 数据预处理完成 ===")
+    print(f"特征维度: {feature_dims}")
+    print(f"输出目录: {args.output_dir}")
+    
+    print("\n=== 数据集统计 ===")
+    for split_name, stats in feature_stats.items():
+        print(f"\n{split_name.upper()}:")
+        print(f"  样本数: {stats['num_samples']}")
+        print(f"  边数 - 均值: {stats['edge_count_stats']['mean']:.1f}, "
+              f"范围: [{stats['edge_count_stats']['min']}, {stats['edge_count_stats']['max']}]")
+        print(f"  节点数 - 均值: {stats['node_count_stats']['mean']:.1f}, "
+              f"范围: [{stats['node_count_stats']['min']}, {stats['node_count_stats']['max']}]")
+        print(f"  亲和力 - 均值: {stats['affinity_stats']['mean']:.2f}, "
+              f"标准差: {stats['affinity_stats']['std']:.2f}")
+
+
+if __name__ == "__main__":
+    main()
