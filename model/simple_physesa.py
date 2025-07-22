@@ -96,7 +96,7 @@ class MaskedSelfAttention(nn.Module):
         return out
     
     def _standard_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """标准注意力实现作为回退"""
+        """标准注意力实现作为回退，基于ESA原版实现"""
         batch_size, seq_len = q.shape[:2]
         
         # 转换为标准的多头注意力格式: [batch_size, num_heads, seq_len, head_dim]
@@ -107,17 +107,19 @@ class MaskedSelfAttention(nn.Module):
         # 计算注意力分数
         attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
         
-        # 应用掩码
+        # 应用掩码 - ESA风格的掩码处理
         if mask is not None:
-            # 处理不同的遮罩形状
-            if mask.dim() == 2:  # [seq_len, seq_len]
-                # ESA边邻接遮罩的情况
+            # ESA边邻接遮罩的情况 [seq_len, seq_len]
+            if mask.dim() == 2:
+                # 扩展掩码到正确的形状
                 mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
-                mask = mask.expand(batch_size, self.num_heads, -1, -1)  # [batch_size, num_heads, seq_len, seq_len]
+                mask = mask.expand(batch_size, self.num_heads, -1, -1)
             elif mask.dim() == 3:  # [batch_size, seq_len, seq_len]
-                mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # [batch_size, num_heads, seq_len, seq_len]
+                mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
             
-            attn_weights = attn_weights.masked_fill(mask == 0, float('-inf'))
+            # ESA使用False表示被掩码的位置，需要设为-inf
+            # 而不是传统的True表示被掩码的位置
+            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
         
         # Softmax归一化
         attn_weights = F.softmax(attn_weights, dim=-1)
@@ -287,60 +289,31 @@ class SimplePhysESA(nn.Module):
     ) -> torch.Tensor:
         """
         创建边邻接掩码：两条边共享一个节点时，它们是邻接的
-        内存友好的版本：对于大图使用分块计算
+        基于ESA原版实现的高效版本
         """
         device = edge_index.device
         
-        # 对于小图，使用向量化版本
-        if num_edges <= 4000:
-            return self._create_mask_vectorized(edge_index, num_edges)
+        # 使用ESA原版的高效实现
+        source_nodes = edge_index[0]
+        target_nodes = edge_index[1]
         
-        # 对于大图，使用分块版本以节省内存
-        return self._create_mask_chunked(edge_index, num_edges)
-    
-    def _create_mask_vectorized(self, edge_index: torch.Tensor, num_edges: int) -> torch.Tensor:
-        """向量化版本的掩码计算"""
-        src_nodes = edge_index[0]  # [num_edges]
-        dst_nodes = edge_index[1]  # [num_edges]
+        # 创建扩展张量用于比较
+        expanded_source_nodes = source_nodes.unsqueeze(1).expand(-1, num_edges)
+        expanded_target_nodes = target_nodes.unsqueeze(1).expand(-1, num_edges)
         
-        # 向量化计算：检查所有边对是否共享节点
-        src_src_match = src_nodes.unsqueeze(1) == src_nodes.unsqueeze(0)  # [num_edges, num_edges]
-        src_dst_match = src_nodes.unsqueeze(1) == dst_nodes.unsqueeze(0)  
-        dst_src_match = dst_nodes.unsqueeze(1) == src_nodes.unsqueeze(0)  
-        dst_dst_match = dst_nodes.unsqueeze(1) == dst_nodes.unsqueeze(0)  
+        # 计算边的邻接关系：如果两条边共享任何节点，它们就是邻接的
+        source_adjacency = expanded_source_nodes == expanded_source_nodes.t()
+        target_adjacency = expanded_target_nodes == expanded_target_nodes.t()
+        cross_adjacency = (expanded_source_nodes == expanded_target_nodes.t()) | \
+                         (expanded_target_nodes == expanded_source_nodes.t())
         
-        # 任何一种匹配都表示边邻接
-        mask = src_src_match | src_dst_match | dst_src_match | dst_dst_match
-        mask.fill_diagonal_(True)
+        # 合并所有邻接关系
+        adjacency_mask = source_adjacency | target_adjacency | cross_adjacency
         
-        return mask
-    
-    def _create_mask_chunked(self, edge_index: torch.Tensor, num_edges: int, chunk_size: int = 1000) -> torch.Tensor:
-        """分块计算版本的掩码计算"""
-        device = edge_index.device
-        src_nodes = edge_index[0]
-        dst_nodes = edge_index[1]
+        # 设置对角线为False（不自注意，与ESA原版保持一致）
+        adjacency_mask.fill_diagonal_(False)
         
-        mask = torch.zeros(num_edges, num_edges, dtype=torch.bool, device=device)
-        
-        # 分块计算以节省内存
-        for i in range(0, num_edges, chunk_size):
-            end_i = min(i + chunk_size, num_edges)
-            
-            for j in range(0, num_edges, chunk_size):
-                end_j = min(j + chunk_size, num_edges)
-                
-                # 计算当前块的掩码
-                src_i = src_nodes[i:end_i].unsqueeze(1)  # [chunk_i, 1]
-                dst_i = dst_nodes[i:end_i].unsqueeze(1)  # [chunk_i, 1]
-                src_j = src_nodes[j:end_j].unsqueeze(0)  # [1, chunk_j]
-                dst_j = dst_nodes[j:end_j].unsqueeze(0)  # [1, chunk_j]
-                
-                chunk_mask = (src_i == src_j) | (src_i == dst_j) | (dst_i == src_j) | (dst_i == dst_j)
-                mask[i:end_i, j:end_j] = chunk_mask
-        
-        mask.fill_diagonal_(True)
-        return mask
+        return adjacency_mask
     
     def prepare_edge_features(self, data: Data) -> torch.Tensor:
         """
