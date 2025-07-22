@@ -104,9 +104,12 @@ class MaskedSelfAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         
-        # 使用PyTorch的scaled_dot_product_attention，这是内存优化的
+        # 计算注意力分数
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        
+        # 应用掩码 - ESA风格的掩码处理
         if mask is not None:
-            # ESA风格的掩码处理
+            # ESA边邻接遮罩的情况 [seq_len, seq_len]
             if mask.dim() == 2:
                 # 扩展掩码到正确的形状 [batch_size, num_heads, seq_len, seq_len]
                 mask = mask.unsqueeze(0).unsqueeze(0)
@@ -114,37 +117,20 @@ class MaskedSelfAttention(nn.Module):
             elif mask.dim() == 3:
                 mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
             
-            # 使用PyTorch的内存优化注意力
-            try:
-                # 使用EFFICIENT_ATTENTION后端，这样可以自动选择最优的实现
-                from torch.nn.attention import SDPBackend, sdpa_kernel
-                with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-                    out = F.scaled_dot_product_attention(
-                        q, k, v, 
-                        attn_mask=mask, 
-                        dropout_p=self.dropout_p if self.training else 0.0, 
-                        is_causal=False
-                    )
-            except ImportError:
-                # 如果没有新版PyTorch，使用手动实现
-                attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-                attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
-                attn_weights = F.softmax(attn_weights, dim=-1)
-                attn_weights = self.dropout(attn_weights)
-                out = torch.matmul(attn_weights, v)
-        else:
-            # 没有掩码的情况，使用标准的scaled_dot_product_attention
-            try:
-                out = F.scaled_dot_product_attention(
-                    q, k, v, 
-                    dropout_p=self.dropout_p if self.training else 0.0
-                )
-            except AttributeError:
-                # 如果PyTorch版本太老
-                attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-                attn_weights = F.softmax(attn_weights, dim=-1)
-                attn_weights = self.dropout(attn_weights)
-                out = torch.matmul(attn_weights, v)
+            # ESA使用True表示有效位置，False表示被掩码的位置
+            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
+        
+        # Softmax归一化
+        attn_weights = F.softmax(attn_weights, dim=-1)
+        
+        # 处理可能的NaN值（当整行都被掩码时）
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        # 应用dropout
+        attn_weights = self.dropout(attn_weights)
+        
+        # 计算输出
+        out = torch.matmul(attn_weights, v)
         
         # 转换回: [batch_size, seq_len, num_heads, head_dim]
         out = out.transpose(1, 2)
