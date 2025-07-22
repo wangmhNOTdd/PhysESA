@@ -279,7 +279,9 @@ def main():
             data_root=args.data_root,
             cutoff_radius=args.cutoff_radius,
             num_gaussians=args.num_gaussians,
-            max_samples=args.max_samples
+            max_samples=args.max_samples,
+            batch_size=1,  # 由于图大小差异很大，使用batch_size=1
+            num_workers=0  # 避免多进程问题
         )
         
         print(f"数据加载完成:")

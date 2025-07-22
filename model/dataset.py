@@ -217,25 +217,25 @@ def create_data_loaders(
     # 创建数据加载器
     train_loader = DataLoader(
         train_dataset, 
-        batch_size=1,  # 阶段一先使用batch_size=1
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=0,  # 避免多进程问题
+        num_workers=num_workers,
         collate_fn=collate_fn
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=num_workers,
         collate_fn=collate_fn
     )
     
     test_loader = DataLoader(
         test_dataset,
-        batch_size=1,
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=num_workers,
         collate_fn=collate_fn
     )
     
