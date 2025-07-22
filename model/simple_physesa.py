@@ -12,29 +12,39 @@ from torch_geometric.utils import to_dense_batch
 from typing import Dict, Optional, Tuple
 import math
 
-# 尝试导入Flash Attention
+# 尝试导入Flash Attention和xformers
 try:
     from flash_attn import flash_attn_func
     FLASH_ATTN_AVAILABLE = True
-    print("[信息] Flash Attention 可用，将使用优化的注意力实现")
+    print("[信息] Flash Attention 可用")
 except ImportError:
     FLASH_ATTN_AVAILABLE = False
-    print("[警告] Flash Attention 未安装，将使用标准注意力实现")
+    print("[警告] Flash Attention 未安装")
+
+try:
+    from xformers.ops import memory_efficient_attention
+    XFORMERS_AVAILABLE = True
+    print("[信息] xformers 可用，将使用内存高效注意力实现")
+except ImportError:
+    XFORMERS_AVAILABLE = False
+    print("[警告] xformers 未安装，将使用标准注意力实现")
 
 class MaskedSelfAttention(nn.Module):
-    """掩码自注意力模块 - Flash Attention优化版本"""
+    """掩码自注意力模块 - 基于ESA的xformers优化版本"""
     
     def __init__(
         self, 
         embed_dim: int, 
         num_heads: int = 8,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        use_xformers: bool = True
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.dropout_p = dropout
+        self.use_xformers = use_xformers and XFORMERS_AVAILABLE
         
         assert self.head_dim * num_heads == embed_dim
         
@@ -48,11 +58,11 @@ class MaskedSelfAttention(nn.Module):
         
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        使用Flash Attention的前向传播（如果可用且条件满足）
+        基于ESA的注意力计算，优先使用xformers
         
         Args:
             x: [batch_size, seq_len, embed_dim] 或 [seq_len, embed_dim]
-            mask: [batch_size, seq_len, seq_len] 注意力掩码
+            mask: [seq_len, seq_len] 注意力掩码（ESA风格，True表示有效）
         """
         if x.dim() == 2:
             x = x.unsqueeze(0)  # 添加batch维度
@@ -64,30 +74,37 @@ class MaskedSelfAttention(nn.Module):
         k = self.k_proj(x)  # [batch_size, seq_len, embed_dim]
         v = self.v_proj(x)  # [batch_size, seq_len, embed_dim]
         
-        # 重塑为多头格式
+        # 重塑为多头格式 - ESA风格
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
         k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
         
-        # 根据条件选择注意力实现
-        use_flash = (FLASH_ATTN_AVAILABLE and 
-                    x.device.type == 'cuda' and 
-                    x.dtype in [torch.float16, torch.bfloat16] and
-                    seq_len <= 8192 and  # Flash Attention 序列长度限制
-                    mask is None)  # 目前跳过掩码以使用Flash Attention
+        # 准备掩码（ESA风格）
+        attn_bias = None
+        if mask is not None:
+            # ESA: True表示有效位置，需要转换为xformers的attn_bias格式
+            # xformers使用0表示有效，-inf表示被掩码
+            attn_bias = torch.zeros_like(mask, dtype=x.dtype, device=x.device)
+            attn_bias = attn_bias.masked_fill(~mask, float('-inf'))
         
-        if use_flash:
-            # 使用Flash Attention
-            out = flash_attn_func(
-                q, k, v, 
-                dropout_p=self.dropout_p if self.training else 0.0
-            )
+        # 使用xformers的内存高效注意力（ESA方式）
+        if self.use_xformers:
+            try:
+                out = memory_efficient_attention(
+                    q, k, v, 
+                    attn_bias=attn_bias,
+                    p=self.dropout_p if self.training else 0.0
+                )
+                # xformers输出格式: [batch_size, seq_len, num_heads, head_dim]
+                out = out.reshape(batch_size, seq_len, embed_dim)
+                
+            except Exception as e:
+                print(f"[注意力] xformers失败，回退到PyTorch实现: {e}")
+                out = self._pytorch_attention(q, k, v, attn_bias)
         else:
-            # 使用标准注意力实现
-            out = self._standard_attention(q, k, v, mask)
+            out = self._pytorch_attention(q, k, v, attn_bias)
         
-        # 重塑输出并应用输出投影
-        out = out.reshape(batch_size, seq_len, embed_dim)  # 使用reshape而不是view
+        # 输出投影
         out = self.out_proj(out)
         
         if batch_size == 1:
@@ -95,45 +112,54 @@ class MaskedSelfAttention(nn.Module):
             
         return out
     
-    def _standard_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """标准注意力实现作为回退，基于ESA原版实现优化"""
+    def _pytorch_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """PyTorch注意力实现作为回退，模仿ESA风格"""
         batch_size, seq_len = q.shape[:2]
         
-        # 转换为标准的多头注意力格式: [batch_size, num_heads, seq_len, head_dim]
+        # 转换为PyTorch格式: [batch_size, num_heads, seq_len, head_dim]
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
         
-        # 计算注意力分数
-        attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        # 准备掩码
+        attn_mask = None
+        if attn_bias is not None:
+            # ESA风格: attn_bias中-inf表示被掩码的位置
+            attn_mask = attn_bias.unsqueeze(0).expand(batch_size, self.num_heads, -1, -1)
         
-        # 应用掩码 - ESA风格的掩码处理
-        if mask is not None:
-            # ESA边邻接遮罩的情况 [seq_len, seq_len]
-            if mask.dim() == 2:
-                # 扩展掩码到正确的形状 [batch_size, num_heads, seq_len, seq_len]
-                mask = mask.unsqueeze(0).unsqueeze(0)
-                mask = mask.expand(batch_size, self.num_heads, -1, -1)
-            elif mask.dim() == 3:
-                mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+        # 尝试使用PyTorch优化注意力
+        try:
+            out = F.scaled_dot_product_attention(
+                q, k, v, 
+                attn_mask=attn_mask,
+                dropout_p=self.dropout_p if self.training else 0.0,
+                is_causal=False
+            )
+        except Exception as e:
+            print(f"[注意力] scaled_dot_product_attention失败，使用手动实现: {e}")
+            # 手动计算注意力分数
+            attn_weights = torch.matmul(q, k.transpose(-2, -1)) * self.scale
             
-            # ESA使用True表示有效位置，False表示被掩码的位置
-            attn_weights = attn_weights.masked_fill(~mask, float('-inf'))
-        
-        # Softmax归一化
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        
-        # 处理可能的NaN值（当整行都被掩码时）
-        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
-        
-        # 应用dropout
-        attn_weights = self.dropout(attn_weights)
-        
-        # 计算输出
-        out = torch.matmul(attn_weights, v)
+            if attn_mask is not None:
+                attn_weights = attn_weights + attn_mask  # attn_bias已经是-inf格式
+            
+            # Softmax归一化
+            attn_weights = F.softmax(attn_weights, dim=-1)
+            
+            # 处理NaN值
+            attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            # 应用dropout
+            attn_weights = self.dropout(attn_weights)
+            
+            # 计算输出
+            out = torch.matmul(attn_weights, v)
         
         # 转换回: [batch_size, seq_len, num_heads, head_dim]
         out = out.transpose(1, 2)
+        
+        # 重塑为最终格式
+        out = out.reshape(batch_size, seq_len, self.embed_dim)
         
         return out
 
@@ -291,11 +317,19 @@ class SimplePhysESA(nn.Module):
         self, 
         edge_index: torch.Tensor, 
         num_edges: int
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         """
-        创建边邻接掩码：基于ESA原版实现，内存优化版本
+        创建边邻接掩码：ESA原版实现
+        现在有xformers支持，可以处理大规模掩码
         """
+        # 如果没有xformers且边数过多，跳过掩码
+        if not XFORMERS_AVAILABLE and num_edges > 10000:
+            print(f"[内存优化] 无xformers支持，跳过边邻接掩码，边数={num_edges}")
+            return None
+            
         device = edge_index.device
+        
+        print(f"[掩码计算] 创建{num_edges}x{num_edges}边邻接掩码...")
         
         # 获取源节点和目标节点
         source_nodes = edge_index[0]
@@ -319,6 +353,8 @@ class SimplePhysESA(nn.Module):
         
         # 转换为布尔类型（与ESA保持一致）
         adjacency_mask = adjacency_mask.bool()
+        
+        print(f"[掩码计算] 完成，掩码尺寸: {adjacency_mask.shape}")
         
         return adjacency_mask
     
