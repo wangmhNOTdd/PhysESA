@@ -62,44 +62,88 @@ class MolecularGraphBuilder:
     
     def parse_sdf_ligand(self, sdf_file: str) -> pd.DataFrame:
         """解析SDF文件，提取配体重原子信息"""
-        mol = Chem.MolFromMolFile(sdf_file)
+        mol = None
+        
+        # 尝试多种方法读取SDF文件
+        try:
+            # 方法1：标准方式
+            mol = Chem.MolFromMolFile(sdf_file)
+        except Exception as e:
+            print(f"[警告] 标准方式读取SDF失败: {e}")
+        
         if mol is None:
+            try:
+                # 方法2：禁用清理，容忍格式问题
+                mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
+                if mol is not None:
+                    # 手动清理分子
+                    Chem.SanitizeMol(mol, Chem.SANITIZE_ALL^Chem.SANITIZE_PROPERTIES)
+                    print("[信息] 使用容错模式成功读取SDF")
+            except Exception as e:
+                print(f"[警告] 容错模式读取SDF失败: {e}")
+        
+        if mol is None:
+            try:
+                # 方法3：尝试从MOL2文件读取（如果存在）
+                mol2_file = sdf_file.replace('.sdf', '.mol2')
+                if os.path.exists(mol2_file):
+                    mol = Chem.MolFromMol2File(mol2_file)
+                    print(f"[信息] 从MOL2文件读取成功: {mol2_file}")
+            except Exception as e:
+                print(f"[警告] MOL2文件读取失败: {e}")
+        
+        if mol is None:
+            print(f"[错误] 所有方法都无法读取配体文件: {sdf_file}")
             return pd.DataFrame()
         
         # 添加氢原子（如果需要）并重新计算
-        mol = Chem.AddHs(mol)
+        try:
+            mol = Chem.AddHs(mol)
+        except Exception as e:
+            print(f"[警告] 添加氢原子失败，使用原分子: {e}")
+            # 如果添加氢原子失败，继续使用原分子
         
-        conf = mol.GetConformer()
+        # 确保分子有坐标
+        if mol.GetNumConformers() == 0:
+            print(f"[错误] 分子没有3D坐标信息: {sdf_file}")
+            return pd.DataFrame()
+            
+        try:
+            conf = mol.GetConformer()
+        except Exception as e:
+            print(f"[错误] 无法获取分子坐标: {e}")
+            return pd.DataFrame()
+            
         atoms_data = []
         
         # 手动统计每个重原子的氢原子邻居数
         for atom in mol.GetAtoms():
             if atom.GetSymbol() != 'H':  # 只保留重原子
-                pos = conf.GetAtomPosition(atom.GetIdx())
-                
-                # 手动统计氢原子邻居数量
-                hydrogen_count = 0
-                heavy_neighbors = 0
-                for neighbor in atom.GetNeighbors():
-                    if neighbor.GetSymbol() == 'H':
-                        hydrogen_count += 1
-                    else:
-                        heavy_neighbors += 1
-                
-                # 如果没有显式氢邻居，使用隐式氢数量
-                if hydrogen_count == 0:
-                    hydrogen_count = atom.GetNumImplicitHs()
-                
-                atoms_data.append({
-                    'element': atom.GetSymbol(),
-                    'x': pos.x,
-                    'y': pos.y,
-                    'z': pos.z,
-                    'hydrogen_count': hydrogen_count,
-                    'heavy_neighbors': heavy_neighbors,
-                    'formal_charge': atom.GetFormalCharge(),
-                    'atom_idx': atom.GetIdx()
-                })
+                try:
+                    pos = conf.GetAtomPosition(atom.GetIdx())
+                    
+                    # 手动统计氢原子邻居数量
+                    hydrogen_count = 0
+                    heavy_neighbors = 0
+                    for neighbor in atom.GetNeighbors():
+                        if neighbor.GetSymbol() == 'H':
+                            hydrogen_count += 1
+                        else:
+                            heavy_neighbors += 1
+                    
+                    atoms_data.append({
+                        'atom_idx': atom.GetIdx(),
+                        'element': atom.GetSymbol(),
+                        'x': float(pos.x),
+                        'y': float(pos.y),
+                        'z': float(pos.z),
+                        'hydrogen_count': hydrogen_count,
+                        'heavy_neighbors': heavy_neighbors,
+                        'is_ligand': True
+                    })
+                except Exception as e:
+                    print(f"[警告] 跳过原子 {atom.GetIdx()}: {e}")
+                    continue
         
         return pd.DataFrame(atoms_data)
     
