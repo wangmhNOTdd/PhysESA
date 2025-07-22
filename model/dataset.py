@@ -205,7 +205,6 @@ def create_data_loaders(
         data_root, complex_ids=train_ids, 
         cutoff_radius=cutoff_radius, num_gaussians=num_gaussians
     )
-    )
     
     val_dataset = PDBBindDataset(
         data_root, complex_ids=val_ids,
