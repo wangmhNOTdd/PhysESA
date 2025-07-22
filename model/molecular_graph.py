@@ -66,19 +66,29 @@ class MolecularGraphBuilder:
         if mol is None:
             return pd.DataFrame()
         
+        # 添加氢原子（如果需要）并重新计算
+        mol = Chem.AddHs(mol)
+        
         conf = mol.GetConformer()
         atoms_data = []
         
-        # 统计每个重原子的氢原子数量和重原子邻居数
+        # 手动统计每个重原子的氢原子邻居数
         for atom in mol.GetAtoms():
             if atom.GetSymbol() != 'H':  # 只保留重原子
                 pos = conf.GetAtomPosition(atom.GetIdx())
                 
-                # 统计氢原子数量
-                hydrogen_count = atom.GetTotalNumHs()
+                # 手动统计氢原子邻居数量
+                hydrogen_count = 0
+                heavy_neighbors = 0
+                for neighbor in atom.GetNeighbors():
+                    if neighbor.GetSymbol() == 'H':
+                        hydrogen_count += 1
+                    else:
+                        heavy_neighbors += 1
                 
-                # 统计重原子邻居数
-                heavy_neighbors = len([n for n in atom.GetNeighbors() if n.GetSymbol() != 'H'])
+                # 如果没有显式氢邻居，使用隐式氢数量
+                if hydrogen_count == 0:
+                    hydrogen_count = atom.GetNumImplicitHs()
                 
                 atoms_data.append({
                     'element': atom.GetSymbol(),
@@ -325,7 +335,7 @@ if __name__ == "__main__":
                     idx = ligand_start_idx + i
                     features = data.x[idx]
                     # 解析特征
-                    atom_type = torch.argmax(features[:10]).item()
+                    atom_type = int(torch.argmax(features[:10]).item())
                     hydrogen_count = features[10].item()
                     heavy_neighbors = features[11].item()
                     
