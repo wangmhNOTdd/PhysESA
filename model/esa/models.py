@@ -163,7 +163,10 @@ class Estimator(pl.LightningModule):
  
         if self.norm_type == "BN":
             norm_fn = BN
-        elif self.norm_type == "LN":
+        elif self.norm_type == "LN" or self.norm_type == "layer_norm":
+            norm_fn = LN
+        else:
+            # 默认使用LayerNorm
             norm_fn = LN
 
         if self.apply_attention_on == "node":
