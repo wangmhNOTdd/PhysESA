@@ -490,6 +490,170 @@ class MolecularGraphBuilder:
             'pos_dim': 3
         }
 
+
+class Stage2GraphBuilder(MolecularGraphBuilder):
+    """阶段二：完整的物理信息增强3D-ESA图构建器"""
+    
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = False, k: int = 16, interface_cutoff: float = 8.0):
+        super().__init__(cutoff_radius, num_gaussians, use_knn, k, interface_cutoff)
+        
+        # 阶段二特征维度定义
+        self.hybridization_types = ['SP', 'SP2', 'SP3', 'SP3D', 'SP3D2', 'UNSPECIFIED']
+        
+        # 节点特征维度:
+        # 原子类型(10) + 形式电荷(1) + 杂化类型(6) + 芳香性(1) + 重邻居数(1) + 总氢数(1) = 20
+        self.atom_feature_dim = 10 + 1 + len(self.hybridization_types) + 1 + 1 + 1
+        
+        # 边特征维度:
+        # 距离GBF(16) + 方向向量(3) + 电荷乘积(1) = 20
+        self.edge_feature_dim = self.num_gaussians + 3 + 1
+
+    def get_atom_features(self, all_atoms_df: pd.DataFrame, ligand_mol: Chem.Mol) -> torch.Tensor:
+        """
+        阶段二：提取完整的原子物理化学特征
+        """
+        # 为配体原子计算Gasteiger电荷
+        Chem.rdPartialCharges.ComputeGasteigerCharges(ligand_mol)
+        
+        all_features = []
+        
+        # 遍历DataFrame中的所有原子（已合并蛋白质和配体）
+        for _, row in all_atoms_df.iterrows():
+            is_ligand = row.get('is_ligand', False)
+            
+            if is_ligand:
+                atom = ligand_mol.GetAtomWithIdx(int(row['atom_idx']))
+                
+                # 1. 原子类型 (10维)
+                atom_type_oh = self.get_atom_type_onehot(atom.GetSymbol())
+                
+                # 2. 形式电荷 (1维)
+                formal_charge = float(atom.GetFormalCharge())
+                
+                # 3. 杂化类型 (6维)
+                hybridization = str(atom.GetHybridization())
+                hybrid_oh = np.zeros(len(self.hybridization_types))
+                if hybridization in self.hybridization_types:
+                    hybrid_oh[self.hybridization_types.index(hybridization)] = 1.0
+                else:
+                    hybrid_oh[-1] = 1.0 # UNSPECIFIED
+                
+                # 4. 芳香性 (1维)
+                is_aromatic = float(atom.GetIsAromatic())
+                
+                # 5. 重原子邻居数 (1维)
+                heavy_neighbors = float(sum(1 for n in atom.GetNeighbors() if n.GetSymbol() != 'H'))
+                
+                # 6. 总氢原子数 (1维)
+                total_hydrogens = float(atom.GetTotalNumHs())
+                
+                # Gasteiger电荷（用于边特征计算，这里先存起来）
+                gasteiger_charge = float(atom.GetProp('_GasteigerCharge'))
+                all_atoms_df.loc[row.name, 'gasteiger_charge'] = gasteiger_charge
+
+            else: # 蛋白质原子
+                # 对蛋白质原子使用简化特征
+                atom_type_oh = self.get_atom_type_onehot(row['element'])
+                formal_charge = 0.0
+                hybrid_oh = np.zeros(len(self.hybridization_types))
+                hybrid_oh[-1] = 1.0 # UNSPECIFIED
+                is_aromatic = 0.0
+                heavy_neighbors = self._estimate_heavy_neighbors(row['element'])
+                total_hydrogens = 0.0 # PDB中不含H
+                all_atoms_df.loc[row.name, 'gasteiger_charge'] = 0.0 # 简化处理
+
+            features = np.concatenate([
+                atom_type_oh,
+                [formal_charge],
+                hybrid_oh,
+                [is_aromatic],
+                [heavy_neighbors],
+                [total_hydrogens]
+            ])
+            all_features.append(features)
+            
+        return torch.tensor(np.array(all_features), dtype=torch.float32)
+
+    def get_full_edge_features(self, edge_indices: torch.Tensor, positions: torch.Tensor, all_atoms_df: pd.DataFrame) -> torch.Tensor:
+        """
+        阶段二：计算完整的边特征（距离、方向、电荷）
+        """
+        # 1. 距离特征 (高斯基函数)
+        src, dst = edge_indices[0], edge_indices[1]
+        distances = torch.norm(positions[dst] - positions[src], dim=-1)
+        distance_features = self.gaussian_basis_functions(distances)
+        
+        # 2. 方向特征 (归一化向量)
+        direction_vectors = (positions[dst] - positions[src]) / (distances.unsqueeze(-1) + 1e-8)
+        
+        # 3. 电荷相互作用特征
+        gasteiger_charges = torch.tensor(all_atoms_df['gasteiger_charge'].values, dtype=torch.float32).to(edge_indices.device)
+        charge_product = (gasteiger_charges[src] * gasteiger_charges[dst]).unsqueeze(-1)
+        
+        # 拼接所有边特征
+        full_edge_features = torch.cat([distance_features, direction_vectors, charge_product], dim=1)
+        
+        return full_edge_features
+
+    def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Data:
+        """
+        阶段二：构建包含完整物理信息的界面分子图
+        """
+        # 解析文件
+        protein_df = self.parse_pdb_file(pdb_file)
+        ligand_df = self.parse_sdf_ligand(sdf_file) # 这会返回带RDKit信息的df
+        
+        # 加载RDKit Mol对象
+        ligand_mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
+        if ligand_mol is None: # 容错
+             ligand_mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
+             Chem.SanitizeMol(ligand_mol, Chem.SANITIZE_ALL^Chem.SANITIZE_PROPERTIES)
+        ligand_mol = Chem.AddHs(ligand_mol, addCoords=True)
+
+        if protein_df.empty or ligand_df.empty or ligand_mol is None:
+            raise ValueError(f"无法解析PDB/SDF文件: {complex_id}")
+        
+        # 过滤界面原子
+        interface_atoms_df, interface_positions, _ = self.filter_interface_atoms(
+            None, protein_df, ligand_df
+        )
+        
+        # 提取完整的原子特征
+        atom_features = self.get_atom_features(interface_atoms_df, ligand_mol)
+        
+        # 构建边
+        if self.use_knn:
+            edge_indices_t, _ = self.build_knn_edges(interface_positions, self.k)
+        else:
+            edge_indices_t, _ = self.build_radius_edges(interface_positions, self.cutoff_radius)
+        
+        edge_index = edge_indices_t.t()
+        if edge_index.shape[1] == 0:
+            raise ValueError(f"复合物 {complex_id} 界面没有找到任何相互作用边")
+            
+        # 提取完整的边特征
+        edge_features = self.get_full_edge_features(edge_index, interface_positions, interface_atoms_df)
+        
+        data = Data(
+            x=atom_features,
+            edge_index=edge_index,
+            edge_attr=edge_features,
+            pos=interface_positions,
+            complex_id=complex_id,
+            num_atoms=interface_positions.shape[0]
+        )
+        
+        return data
+
+    def get_feature_dimensions(self) -> Dict[str, int]:
+        """返回阶段二的特征维度信息"""
+        return {
+            'node_dim': self.atom_feature_dim,
+            'edge_dim': self.edge_feature_dim,
+            'pos_dim': 3
+        }
+
+
 # 辅助函数
 def load_pdbbind_metadata(metadata_path: str) -> Dict:
     """加载PDBbind数据集的元数据"""
@@ -593,3 +757,70 @@ if __name__ == "__main__":
             traceback.print_exc()
     else:
         print(f"找不到文件: {pdb_file} 或 {sdf_file}")
+
+def prepare_split_data(
+    data_root: str,
+    split_type: str = "scaffold_split",
+    max_samples_per_split: Optional[int] = None
+) -> Tuple[List[str], List[str], List[str]]:
+    """
+    准备数据分割
+    
+    Args:
+        data_root: 数据根目录
+        split_type: 分割类型 ("scaffold_split", "identity30_split", "identity60_split")
+        max_samples_per_split: 每个分割的最大样本数（用于调试）
+    
+    Returns:
+        (train_ids, val_ids, test_ids)
+    """
+    metadata_path = os.path.join(data_root, 'metadata')
+    split_file = os.path.join(metadata_path, f'{split_type}.json')
+    
+    if os.path.exists(split_file):
+        print(f"使用预定义分割: {split_file}")
+        with open(split_file, 'r') as f:
+            split_data = json.load(f)
+        
+        train_ids = split_data.get('train', [])
+        val_ids = split_data.get('val', split_data.get('valid', []))  # 兼容不同命名
+        test_ids = split_data.get('test', [])
+        
+        # 如果预定义分割中没有验证集，从训练集中分出一部分
+        if len(val_ids) == 0 and len(train_ids) > 0:
+            print("预定义分割中没有验证集，从训练集分出10%作为验证集")
+            n_val = max(1, len(train_ids) // 10)  # 至少1个样本
+            val_ids = train_ids[-n_val:]
+            train_ids = train_ids[:-n_val]
+        
+        # 限制样本数量（用于调试）
+        if max_samples_per_split:
+            train_ids = train_ids[:max_samples_per_split]
+            val_ids = val_ids[:max(1, max_samples_per_split//10)]  # 验证集至少1个
+            test_ids = test_ids[:max(1, max_samples_per_split//10)]  # 测试集至少1个
+            
+    else:
+        print("使用简单的8:1:1分割")
+        # 扫描所有可用的复合物
+        pdb_files_dir = os.path.join(data_root, 'pdb_files')
+        all_ids = [d for d in os.listdir(pdb_files_dir) 
+                  if os.path.isdir(os.path.join(pdb_files_dir, d))]
+        
+        if max_samples_per_split:
+            all_ids = all_ids[:int(max_samples_per_split * 1.25)]  # 稍微多一点以保证足够的样本
+            
+        # 简单分割
+        n_total = len(all_ids)
+        n_train = int(0.8 * n_total)
+        n_val = int(0.1 * n_total)
+        
+        train_ids = all_ids[:n_train]
+        val_ids = all_ids[n_train:n_train + n_val]
+        test_ids = all_ids[n_train + n_val:]
+    
+    print(f"数据分割统计:")
+    print(f"  训练集: {len(train_ids)}")
+    print(f"  验证集: {len(val_ids)}")
+    print(f"  测试集: {len(test_ids)}")
+    
+    return train_ids, val_ids, test_ids
