@@ -1,9 +1,3 @@
-"""
-阶段一：基础框架验证 - 分子图构建器（改进版本）
-将氢原子作为重原子的特征，而不是独立节点
-只包含重原子作为节点，氢原子数量作为原子特征
-"""
-
 import numpy as np
 import pandas as pd
 import torch

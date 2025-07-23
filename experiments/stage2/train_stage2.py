@@ -18,8 +18,11 @@ import argparse
 import sys
 from torch_geometric.data import Batch
 
-# 添加项目根目录
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# 添加项目根目录和model目录到sys.path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(project_root)
+sys.path.append(os.path.join(project_root, 'model'))
+
 from model.phys_esa import PhysESA
 
 class Stage2Dataset(Dataset):
