@@ -522,7 +522,7 @@ class Stage2GraphBuilder(MolecularGraphBuilder):
         for _, row in all_atoms_df.iterrows():
             is_ligand = row.get('is_ligand', False)
             
-            if is_ligand:
+            if is_ligand is True:
                 atom = ligand_mol.GetAtomWithIdx(int(row['atom_idx']))
                 
                 # 1. 原子类型 (10维)
