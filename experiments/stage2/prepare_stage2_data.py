@@ -13,6 +13,7 @@ from typing import List, Dict, Tuple, Optional
 from tqdm import tqdm
 import argparse
 import sys
+import traceback
 
 # 添加项目根目录到sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -51,7 +52,8 @@ def process_complex_list(
             graph_data.y = torch.tensor([affinity], dtype=torch.float32)
             processed_data.append(graph_data)
         except Exception as e:
-            # print(f"跳过 {complex_id}: 图构建失败 - {e}")
+            print(f"错误: 跳过 {complex_id}: 图构建失败 - {e}")
+            traceback.print_exc() # 打印详细的堆栈跟踪
             continue
     
     print(f"{split_name} 有效样本数: {len(processed_data)}")
