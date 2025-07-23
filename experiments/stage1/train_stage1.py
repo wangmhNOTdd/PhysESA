@@ -55,87 +55,43 @@ class Stage1Dataset(Dataset):
         return self.data[idx]
 
 
-def collate_fn(batch: List[Dict]) -> Data:
+def collate_fn(batch: List[Dict]) -> Batch:
     """
     自定义collate函数，为ESA模型准备标准格式的图数据
+    直接使用预处理好的节点/边特征，而不是从edge_representations重构
     """
-    # 收集节点特征和边特征
-    all_node_features = []
-    all_edge_features = []
-    all_edge_indices = []
-    all_affinities = []
-    node_batch_indices = []
-    edge_batch_indices = []
-    
-    node_offset = 0
+    data_list = []
     max_nodes = 0
     max_edges = 0
-    
-    for i, sample in enumerate(batch):
-        # 获取原始图数据
-        edge_representations = sample['edge_representations']  # [num_edges, feature_dim]
-        edge_index = sample['edge_index']  # [2, num_edges] 
+
+    for sample in batch:
+        # 直接使用预处理好的特征
+        node_features = sample['node_features']
+        edge_features = sample['edge_features']
+        edge_index = sample['edge_index']
+        affinity = sample['affinity']
         num_nodes = sample['num_nodes']
-        num_edges = edge_representations.shape[0]
+        num_edges = sample['num_edges']
+
+        data = Data(
+            x=node_features,
+            edge_index=edge_index,
+            edge_attr=edge_features,
+            y=torch.tensor([affinity], dtype=torch.float32)
+        )
+        data_list.append(data)
         
-        # 从边表示中提取节点特征（前42维是源节点+目标节点特征）
-        # edge_representations结构：[src_node_features(42) + dst_node_features(42) + edge_features(16)]
-        src_features = edge_representations[:, :42]  # [num_edges, 42]
-        dst_features = edge_representations[:, 42:84]  # [num_edges, 42] 
-        edge_features = edge_representations[:, 84:]  # [num_edges, 16]
-        
-        # 重建节点特征矩阵
-        # 我们需要从边表示重构出唯一的节点特征
-        # 简化方法：使用边的源节点特征，按节点ID平均
-        node_features = torch.zeros(num_nodes, 42)
-        node_counts = torch.zeros(num_nodes)
-        
-        # 累加每个节点的特征
-        for j in range(num_edges):
-            src_id, dst_id = edge_index[0, j], edge_index[1, j]
-            node_features[src_id] += src_features[j]
-            node_features[dst_id] += dst_features[j]
-            node_counts[src_id] += 1
-            node_counts[dst_id] += 1
-        
-        # 计算平均值
-        node_counts[node_counts == 0] = 1  # 避免除零
-        node_features = node_features / node_counts.unsqueeze(1)
-        
-        all_node_features.append(node_features)
-        all_edge_features.append(edge_features)
-        all_edge_indices.append(edge_index + node_offset)
-        all_affinities.append(sample['affinity'])
-        
-        # 批次索引
-        node_batch_indices.extend([i] * num_nodes)
-        edge_batch_indices.extend([i] * num_edges)
-        
-        node_offset += num_nodes
         max_nodes = max(max_nodes, num_nodes)
         max_edges = max(max_edges, num_edges)
-    
-    # 拼接所有数据
-    x = torch.cat(all_node_features, dim=0)  # [total_nodes, 42]
-    edge_attr = torch.cat(all_edge_features, dim=0)  # [total_edges, 16]
-    edge_index = torch.cat(all_edge_indices, dim=1)  # [2, total_edges]
-    y = torch.tensor(all_affinities, dtype=torch.float32)  # [batch_size]
-    node_batch = torch.tensor(node_batch_indices, dtype=torch.long)
-    edge_batch = torch.tensor(edge_batch_indices, dtype=torch.long)
-    
-    # 创建Data对象
-    batch_data = Data(
-        x=x,                    # [total_nodes, 42] - 节点特征
-        edge_index=edge_index,  # [2, total_edges] - 边连接
-        edge_attr=edge_attr,    # [total_edges, 16] - 边特征
-        batch=node_batch,       # [total_nodes] - 节点批次索引
-        y=y                     # [batch_size] - 目标值
-    )
+
+    # 使用torch_geometric的Batch类自动处理批处理
+    batch_data = Batch.from_data_list(data_list)
     
     # 添加ESA需要的全局属性
     def nearest_multiple_of_8(n):
         return math.ceil(n / 8) * 8
     
+    # 注意：这里的max_node/edge_global是整个批次中单个图的最大值，而不是总和
     batch_data.max_node_global = torch.tensor([nearest_multiple_of_8(max_nodes + 1)], dtype=torch.long)
     batch_data.max_edge_global = torch.tensor([nearest_multiple_of_8(max_edges + 1)], dtype=torch.long)
     
