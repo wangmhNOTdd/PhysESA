@@ -42,8 +42,11 @@ class PhysESA(pl.LightningModule):
         self.esa_model = Estimator(**esa_config)
 
         # Define a new output layer suitable for graph regression
+        # Define a new output layer suitable for graph regression.
+        # We fetch the dimensions from the instantiated esa_model to ensure correctness.
+        input_dims = self.esa_model.num_inds * self.esa_model.hidden_dim
         self.output_layer = nn.Sequential(
-            nn.Linear(esa_config['num_inds'] * esa_config['hidden_dim'], 512),
+            nn.Linear(input_dims, 512),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(512, 1)
