@@ -17,18 +17,20 @@ from typing import Tuple, Dict, List, Optional
 class MolecularGraphBuilder:
     """改进的分子图构建器 - 阶段一版本（重原子+氢原子特征）"""
     
-    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = False, k: int = 16):
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = False, k: int = 16, interface_cutoff: float = 8.0):
         """
         Args:
             cutoff_radius: 原子间相互作用的截断半径 (Å)
             num_gaussians: 高斯基函数的数量
             use_knn: 是否使用KNN连边方式
             k: KNN中的k值（每个原子连接最近的k个原子）
+            interface_cutoff: 定义复合物界面的距离阈值 (Å) - 蛋白质原子到配体的最近距离
         """
         self.cutoff_radius = cutoff_radius
         self.num_gaussians = num_gaussians
         self.use_knn = use_knn
         self.k = k
+        self.interface_cutoff = interface_cutoff
         
         # 重原子特征维度：原子类型(10) + 氢原子数(1) + 重原子邻居数(1) = 12
         self.atom_feature_dim = 12
@@ -307,9 +309,83 @@ class MolecularGraphBuilder:
         
         return edge_indices, edge_distances
     
+    def identify_interface_atoms(self, protein_positions: torch.Tensor, ligand_positions: torch.Tensor) -> torch.Tensor:
+        """
+        识别复合物界面的原子
+        
+        Args:
+            protein_positions: [num_protein_atoms, 3] 蛋白质原子坐标
+            ligand_positions: [num_ligand_atoms, 3] 配体原子坐标
+            
+        Returns:
+            interface_mask: [num_protein_atoms] 布尔掩码，True表示界面原子
+        """
+        num_protein_atoms = protein_positions.shape[0]
+        num_ligand_atoms = ligand_positions.shape[0]
+        
+        # 计算蛋白质原子到所有配体原子的距离
+        protein_expanded = protein_positions.unsqueeze(1)  # [num_protein_atoms, 1, 3]
+        ligand_expanded = ligand_positions.unsqueeze(0)    # [1, num_ligand_atoms, 3]
+        
+        # 距离矩阵: [num_protein_atoms, num_ligand_atoms]
+        distances = torch.norm(protein_expanded - ligand_expanded, dim=2)
+        
+        # 找到每个蛋白质原子到配体的最小距离
+        min_distances = torch.min(distances, dim=1)[0]  # [num_protein_atoms]
+        
+        # 界面原子：距离配体在interface_cutoff范围内的蛋白质原子
+        interface_mask = min_distances <= self.interface_cutoff
+        
+        return interface_mask
+    
+    def filter_interface_atoms(self, all_atoms_df, protein_df, ligand_df) -> Tuple[pd.DataFrame, torch.Tensor, torch.Tensor]:
+        """
+        过滤出界面原子，重新构建原子列表
+        
+        Returns:
+            interface_atoms_df: 界面原子的DataFrame
+            interface_positions: [num_interface_atoms, 3] 界面原子坐标
+            atom_type_mask: [num_interface_atoms] 原子类型掩码 (0=蛋白质界面原子, 1=配体原子)
+        """
+        # 提取坐标
+        protein_positions = torch.tensor(protein_df[['x', 'y', 'z']].values, dtype=torch.float32)
+        ligand_positions = torch.tensor(ligand_df[['x', 'y', 'z']].values, dtype=torch.float32)
+        
+        # 识别界面蛋白质原子
+        protein_interface_mask = self.identify_interface_atoms(protein_positions, ligand_positions)
+        
+        # 过滤界面蛋白质原子
+        interface_protein_df = protein_df[protein_interface_mask.numpy()]
+        
+        # 合并界面蛋白质原子和所有配体原子
+        interface_atoms_df = pd.concat([interface_protein_df, ligand_df], ignore_index=True)
+        interface_atoms_df['atom_id'] = range(len(interface_atoms_df))
+        
+        # 提取界面原子坐标
+        interface_positions = torch.tensor(
+            interface_atoms_df[['x', 'y', 'z']].values, 
+            dtype=torch.float32
+        )
+        
+        # 创建原子类型掩码：0表示蛋白质界面原子，1表示配体原子
+        num_interface_protein = len(interface_protein_df)
+        num_ligand = len(ligand_df)
+        atom_type_mask = torch.cat([
+            torch.zeros(num_interface_protein, dtype=torch.long),  # 蛋白质界面原子
+            torch.ones(num_ligand, dtype=torch.long)               # 配体原子
+        ])
+        
+        print(f"界面识别结果:")
+        print(f"  蛋白质总原子数: {len(protein_df)}")
+        print(f"  界面蛋白质原子数: {num_interface_protein}")
+        print(f"  配体原子数: {num_ligand}")
+        print(f"  界面总原子数: {len(interface_atoms_df)}")
+        
+        return interface_atoms_df, interface_positions, atom_type_mask
+    
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Data:
         """
-        构建完整的分子图（只包含重原子）
+        构建界面分子图（只包含重原子，专注于复合物界面）
         
         Args:
             complex_id: 复合物ID
@@ -328,29 +404,29 @@ class MolecularGraphBuilder:
         if ligand_df.empty:
             raise ValueError(f"无法解析配体文件: {sdf_file}")
         
-        # 合并原子信息
-        all_atoms_protein = protein_df[['element', 'x', 'y', 'z']].copy()
-        all_atoms_ligand = ligand_df[['element', 'x', 'y', 'z']].copy()
-        all_atoms_df = pd.concat([all_atoms_protein, all_atoms_ligand], ignore_index=True)
-        all_atoms_df['atom_id'] = range(len(all_atoms_df))
-        
-        # 提取原子坐标和特征
-        positions = torch.tensor(
-            all_atoms_df[['x', 'y', 'z']].values, 
-            dtype=torch.float32
+        # 过滤界面原子
+        interface_atoms_df, interface_positions, atom_type_mask = self.filter_interface_atoms(
+            None, protein_df, ligand_df
         )
-        atom_features = self.get_atom_features(protein_df, ligand_df)
         
-        # 构建边连接：根据配置选择KNN或截断半径方式
+        # 为界面原子提取特征
+        # 重新分离界面蛋白质原子和配体原子用于特征提取
+        num_interface_protein = torch.sum(atom_type_mask == 0).item()
+        interface_protein_df = interface_atoms_df.iloc[:num_interface_protein]
+        interface_ligand_df = interface_atoms_df.iloc[num_interface_protein:]
+        
+        atom_features = self.get_atom_features(interface_protein_df, interface_ligand_df)
+        
+        # 构建边连接：只对界面原子进行KNN或截断半径连边
         if self.use_knn:
-            edge_indices, edge_distances = self.build_knn_edges(positions, self.k)
-            print(f"使用KNN连边 (k={self.k}): 边数={edge_indices.shape[0]}")
+            edge_indices, edge_distances = self.build_knn_edges(interface_positions, self.k)
+            print(f"界面KNN连边 (k={self.k}): 边数={edge_indices.shape[0]}")
         else:
-            edge_indices, edge_distances = self.build_radius_edges(positions, self.cutoff_radius)
-            print(f"使用截断半径连边 (r={self.cutoff_radius}Å): 边数={edge_indices.shape[0]}")
+            edge_indices, edge_distances = self.build_radius_edges(interface_positions, self.cutoff_radius)
+            print(f"界面截断半径连边 (r={self.cutoff_radius}Å): 边数={edge_indices.shape[0]}")
         
         if edge_indices.shape[0] == 0:
-            raise ValueError(f"复合物 {complex_id} 没有找到任何相互作用边")
+            raise ValueError(f"复合物 {complex_id} 界面没有找到任何相互作用边")
         
         # 使用高斯基函数扩展距离特征
         edge_features = self.gaussian_basis_functions(edge_distances)  # [num_edges, num_gaussians]
@@ -360,13 +436,14 @@ class MolecularGraphBuilder:
         
         # 构建PyTorch Geometric Data对象
         data = Data(
-            x=atom_features,           # [num_atoms, atom_feature_dim] 
+            x=atom_features,           # [num_interface_atoms, atom_feature_dim] 
             edge_index=edge_index,     # [2, num_edges]
             edge_attr=edge_features,   # [num_edges, num_gaussians]
-            pos=positions,             # [num_atoms, 3]
+            pos=interface_positions,   # [num_interface_atoms, 3]
             complex_id=complex_id,
-            num_protein_atoms=len(protein_df),
-            num_ligand_atoms=len(ligand_df)
+            num_atoms=len(interface_atoms_df),
+            num_protein_atoms=num_interface_protein,
+            num_ligand_atoms=len(interface_ligand_df)
         )
         
         return data
