@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from torch_geometric.data import Data, Batch
 from torch.nn import functional as F
 import bitsandbytes as bnb
+import torch_geometric
 
 from esa.models import Estimator
 from molecular_graph import Stage2GraphBuilder
@@ -45,14 +46,31 @@ class PhysESA(pl.LightningModule):
         The forward pass for the PhysESA model.
         It directly uses the pre-computed graph features from the batch.
         """
-        predictions = self.esa_model(
-            x=batch.x,
-            edge_index=batch.edge_index,
-            batch_mapping=batch.batch,
-            edge_attr=batch.edge_attr,
-            num_max_items=batch.max_edge_global.item(),
-            batch=batch
-        )
+        # 直接调用esa_model的内部forward，并传递正确的num_max_items
+        # 我们不再依赖esa_model._step中的逻辑，以确保维度一致
+        
+        # 1. 准备ESA的输入
+        x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
+        num_max_items = batch.max_edge_global.item()
+
+        # 2. 复刻Estimator.forward中的逻辑
+        source = x[edge_index[0, :], :]
+        target = x[edge_index[1, :], :]
+        h = torch.cat((source, target), dim=1)
+
+        if self.esa_model.edge_dim is not None and edge_attr is not None:
+            h = torch.cat((h, edge_attr.float()), dim=1)
+
+        h = self.esa_model.node_edge_mlp(h)
+
+        edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
+        h, _ = torch_geometric.utils.to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
+        
+        # 3. 调用核心的ESA模块
+        h = self.esa_model.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items)
+        
+        # 4. 得到最终预测
+        predictions = torch.flatten(self.esa_model.output_mlp(h))
         return predictions
 
     def _common_step(self, batch, batch_idx):

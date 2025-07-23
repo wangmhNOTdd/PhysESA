@@ -110,13 +110,20 @@ def main():
     all_node_counts = [data.num_nodes for data in train_dataset.data + val_dataset.data]
     all_edge_counts = [data.num_edges for data in train_dataset.data + val_dataset.data]
     
-    # 关键修复：传递原始最大值，让Estimator内部处理填充
-    raw_max_nodes = max(all_node_counts)
-    raw_max_edges = max(all_edge_counts)
+    # 关键修复：预先计算最终的填充尺寸，并将其传递给所有组件
+    def nearest_multiple_of_8(n):
+        return math.ceil(n / 8) * 8
+        
+    raw_max_nodes = max(all_node_counts) if all_node_counts else 0
+    raw_max_edges = max(all_edge_counts) if all_edge_counts else 0
     
-    esa_config['set_max_items'] = raw_max_edges
+    # ESA模型内部会对 set_max_items + 1，所以我们在这里也这样做以保持一致
+    final_max_nodes = nearest_multiple_of_8(raw_max_nodes + 1)
+    final_max_edges = nearest_multiple_of_8(raw_max_edges + 1)
     
-    collater = Collater(global_max_edges=raw_max_edges, global_max_nodes=raw_max_nodes)
+    esa_config['set_max_items'] = raw_max_edges # Estimator期望接收原始值
+    
+    collater = Collater(global_max_edges=final_max_edges, global_max_nodes=final_max_nodes)
     
     train_loader = DataLoader(train_dataset, batch_size=training_config['batch_size'], shuffle=True, num_workers=training_config['num_workers'], collate_fn=collater)
     val_loader = DataLoader(val_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
