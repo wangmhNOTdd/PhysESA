@@ -58,6 +58,9 @@ def main():
     # ... (可以添加更多命令行参数来覆盖配置)
     args = parser.parse_args()
 
+    # 性能优化建议
+    torch.set_float32_matmul_precision('medium')
+
     os.makedirs(args.output_dir, exist_ok=True)
     
     # --- 1. 加载配置 ---
@@ -107,14 +110,13 @@ def main():
     all_node_counts = [data.num_nodes for data in train_dataset.data + val_dataset.data]
     all_edge_counts = [data.num_edges for data in train_dataset.data + val_dataset.data]
     
-    def nearest_multiple_of_8(n):
-        return math.ceil(n / 8) * 8
-        
-    max_nodes = nearest_multiple_of_8(max(all_node_counts) + 1)
-    max_edges = nearest_multiple_of_8(max(all_edge_counts) + 1)
-    esa_config['set_max_items'] = max_edges
+    # 关键修复：传递原始最大值，让Estimator内部处理填充
+    raw_max_nodes = max(all_node_counts)
+    raw_max_edges = max(all_edge_counts)
     
-    collater = Collater(global_max_edges=max_edges, global_max_nodes=max_nodes)
+    esa_config['set_max_items'] = raw_max_edges
+    
+    collater = Collater(global_max_edges=raw_max_edges, global_max_nodes=raw_max_nodes)
     
     train_loader = DataLoader(train_dataset, batch_size=training_config['batch_size'], shuffle=True, num_workers=training_config['num_workers'], collate_fn=collater)
     val_loader = DataLoader(val_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
