@@ -84,7 +84,7 @@ def main():
         'graph_dim': 128,
         'linear_output_size': 1,
         'monitor_loss_name': "val_loss",
-        'xformers_or_torch_attn': "xformers",
+        'xformers_or_torch_attn': "xformers", # 启用 xformers
         'hidden_dims': [128, 128, 128],
         'num_heads': [8, 8, 8],
         'layer_types': ['M', 'S', 'M'], # 交错MAB和SAB
@@ -93,7 +93,7 @@ def main():
         'pma_dropout': 0.1,
         'apply_attention_on': "edge",
         'use_mlps': True,
-        'mlp_type': "standard",
+        'mlp_type': "gated_mlp", # 启用 gated_mlp 以使用 flash-attn
         'norm_type': "LN",
         'regression_loss_fn': "mse",
         'posenc': ""
