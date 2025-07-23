@@ -3,7 +3,8 @@ import admin_torch
 
 from torch import nn
 from torch.nn import functional as F
-from torch_geometric.utils import unbatch_edge_index
+from torch_geometric.utils import unbatch_edge_index, to_dense_batch
+from torch_geometric.data import Batch
 
 from utils.norm_layers import BN, LN
 from esa.mha import SAB, PMA
@@ -746,7 +747,7 @@ class Estimator(nn.Module):
 
         # 3. Convert to dense batch for the attention mechanism
         edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
-        h, _ = torch_geometric.utils.to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
+        h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
         # 4. Pass through the core ESA model
         predictions = self.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items)
