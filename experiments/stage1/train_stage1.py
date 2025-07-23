@@ -190,7 +190,7 @@ class Stage1Trainer:
             use_mlps=True,
             mlp_hidden_size=128,
             mlp_type="standard",
-            norm_type="layer_norm",
+            norm_type="LN",  # 使用Layer Norm（ESA模型识别的格式）
             set_max_items=self.max_edges,
             early_stopping_patience=self.config['patience'],
             optimiser_weight_decay=self.config['weight_decay'],
