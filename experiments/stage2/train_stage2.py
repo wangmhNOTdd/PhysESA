@@ -157,7 +157,7 @@ def main():
         logger=logger,
         accelerator='gpu' if torch.cuda.is_available() else 'cpu',
         devices=1,
-        precision=16 if training_config['use_fp16'] else 32,
+        precision="16-mixed" if training_config['use_fp16'] else 32,
         gradient_clip_val=training_config['grad_clip']
     )
 

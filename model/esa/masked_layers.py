@@ -11,7 +11,7 @@ from esa.mlp_utils import SmallMLP, GatedMLPMulti
 
 
 def get_adj_mask_from_edge_index_node(
-    edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, use_bfloat16=True, device="cuda:0"
+    edge_index, batch_size, max_items, batch_mapping, xformers_or_torch_attn, dtype, device="cuda:0"
 ):
     if xformers_or_torch_attn in ["torch"]:
         empty_mask_fill_value = False
@@ -19,7 +19,7 @@ def get_adj_mask_from_edge_index_node(
         edge_mask_fill_value = True
     else:
         empty_mask_fill_value = -99999
-        mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+        mask_dtype = dtype # 使用传入的dtype
         edge_mask_fill_value = 0
 
     adj_mask = torch.full(
@@ -148,7 +148,7 @@ def get_adj_mask_from_edge_index_edge(
     max_items,
     batch_mapping,
     xformers_or_torch_attn,
-    use_bfloat16=True,
+    dtype,
     device="cuda:0",
 ):
     if xformers_or_torch_attn in ["torch"]:
@@ -157,7 +157,7 @@ def get_adj_mask_from_edge_index_edge(
         edge_mask_fill_value = True
     else:
         empty_mask_fill_value = -99999
-        mask_dtype = torch.bfloat16 if use_bfloat16 else torch.float32
+        mask_dtype = dtype # 使用传入的dtype
         edge_mask_fill_value = 0
 
     adj_mask = torch.full(
@@ -651,7 +651,7 @@ class ESA(nn.Module):
                 batch_size=X.shape[0],
                 max_items=self.set_max_items,
                 xformers_or_torch_attn=self.xformers_or_torch_attn,
-                use_bfloat16=self.use_bfloat16,
+                dtype=X.dtype, # 动态传递dtype
             )
         elif self.node_or_edge == "edge":
             adj_mask = get_adj_mask_from_edge_index_edge(
@@ -660,7 +660,7 @@ class ESA(nn.Module):
                 batch_size=X.shape[0],
                 max_items=self.set_max_items,
                 xformers_or_torch_attn=self.xformers_or_torch_attn,
-                use_bfloat16=self.use_bfloat16,
+                dtype=X.dtype, # 动态传递dtype
             )
 
         enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
