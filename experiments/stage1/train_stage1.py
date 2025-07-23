@@ -17,6 +17,7 @@ from typing import List, Dict, Any
 import argparse
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import sys
+from torch_geometric.data import Data, Batch
 
 # 添加model路径
 sys.path.append('./model')
@@ -90,14 +91,19 @@ def collate_fn(batch: List[Dict]) -> Dict:
     # 计算最大边数（用于padding）
     max_edges = max(num_edges_list)
     
-    return {
-        'x': edge_representations,           # [total_edges, feature_dim]
-        'edge_index': edge_indices,          # [2, total_edges] 
-        'batch': batch_indices,              # [total_edges]
-        'y': affinities,                     # [batch_size]
-        'num_max_items': max_edges,          # int
-        'edge_attr': None                    # 在edge_representations中已包含
-    }
+    # 创建PyG Data对象
+    batch_data = Data(
+        x=edge_representations,           # [total_edges, feature_dim]
+        edge_index=edge_indices,          # [2, total_edges] 
+        batch=batch_indices,              # [total_edges]
+        y=affinities,                     # [batch_size]
+        edge_attr=None                    # 在edge_representations中已包含
+    )
+    
+    # 添加额外的属性
+    batch_data.num_max_items = max_edges
+    
+    return batch_data
 
 
 class Stage1Trainer:
