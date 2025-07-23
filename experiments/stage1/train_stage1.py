@@ -160,6 +160,8 @@ class Stage1Trainer:
         
         # 计算输入特征维度：node_dim * 2 + edge_dim
         # (每条边由两个节点特征 + 边特征组成)
+        # 节点特征包括：原子类型one-hot编码(10维) + Fourier位置编码(32维) = 42维
+        # 因此我们实际上是在使用位置编码的，只是集成在节点特征中而非ESA内置编码器
         input_dim = feature_dims['node_dim'] * 2 + feature_dims['edge_dim']
         
         print(f"模型配置:")
@@ -193,8 +195,8 @@ class Stage1Trainer:
             early_stopping_patience=self.config['patience'],
             optimiser_weight_decay=self.config['weight_decay'],
             regression_loss_fn="mse",
-            posenc=None,  # 不使用额外的位置编码（我们在输入中已包含）
-            posenc_dim=0  # 位置编码维度设为0
+            posenc="",  # 不使用ESA内置位置编码（我们在节点特征中已包含Fourier位置编码）
+            posenc_dim=0  # ESA内置位置编码维度设为0
         )
         
         return model
