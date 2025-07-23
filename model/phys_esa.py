@@ -41,6 +41,14 @@ class PhysESA(pl.LightningModule):
         # The core ESA model is instantiated here
         self.esa_model = Estimator(**esa_config)
 
+        # Define a new output layer suitable for graph regression
+        self.output_layer = nn.Sequential(
+            nn.Linear(esa_config['num_inds'] * esa_config['hidden_dim'], 512),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(512, 1)
+        )
+
     def forward(self, batch: Batch) -> torch.Tensor:
         """
         The forward pass for the PhysESA model.
@@ -74,8 +82,8 @@ class PhysESA(pl.LightningModule):
         # It needs to be flattened before being passed to the final MLP.
         h = torch.flatten(h, start_dim=1)
         
-        # The output_mlp then maps from (batch_size, num_inds * hidden_dim) to (batch_size, out_dim).
-        predictions = self.esa_model.output_mlp(h)
+        # Use our custom output_layer instead of the one from Estimator
+        predictions = self.output_layer(h)
         
         return predictions
 
