@@ -645,6 +645,7 @@ class ESA(nn.Module):
 
     def forward(self, X, edge_index, batch_mapping, num_max_items):
 
+        adj_mask = None
         if self.node_or_edge == "node":
             adj_mask = get_adj_mask_from_edge_index_node(
                 edge_index=edge_index,
@@ -663,6 +664,26 @@ class ESA(nn.Module):
                 xformers_or_torch_attn=self.xformers_or_torch_attn,
                 dtype=X.dtype, # 动态传递dtype
             )
+
+        # Pad the mask to match the padded input tensor X for hardware efficiency
+        if adj_mask is not None:
+            current_size = adj_mask.shape[-1]
+            target_size = X.shape[1]
+
+            if current_size < target_size:
+                pad_amount = target_size - current_size
+                # Pad the last two dimensions (height and width of the mask)
+                padding = (0, pad_amount, 0, pad_amount)
+                
+                # Use the correct fill value for the attention backend
+                if self.xformers_or_torch_attn in ["torch"]:
+                    # This value will be inverted to True (attend) for padded tokens
+                    pad_value = False
+                else:
+                    # This is a large negative number to ensure padded tokens are ignored
+                    pad_value = -99999
+                
+                adj_mask = F.pad(adj_mask, padding, "constant", value=pad_value)
 
         enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
         if hasattr(self, "dim_pma") and self.dim_hidden[0] != self.dim_pma:
