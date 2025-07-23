@@ -57,57 +57,87 @@ class Stage1Dataset(Dataset):
 
 def collate_fn(batch: List[Dict]) -> Data:
     """
-    自定义collate函数，将边表示作为节点输入ESA模型
+    自定义collate函数，为ESA模型准备标准格式的图数据
     """
-    # 收集所有边表示作为节点特征
-    all_edge_representations = []
+    # 收集节点特征和边特征
+    all_node_features = []
+    all_edge_features = []
+    all_edge_indices = []
     all_affinities = []
-    batch_indices = []
-    edge_indices = []
+    node_batch_indices = []
+    edge_batch_indices = []
     
+    node_offset = 0
+    max_nodes = 0
     max_edges = 0
-    total_edges = 0
-    current_edge_offset = 0
     
     for i, sample in enumerate(batch):
-        edge_repr = sample['edge_representations']  # [num_edges, feature_dim]
-        num_edges = edge_repr.shape[0]
+        # 获取原始图数据
+        edge_representations = sample['edge_representations']  # [num_edges, feature_dim]
+        edge_index = sample['edge_index']  # [2, num_edges] 
+        num_nodes = sample['num_nodes']
+        num_edges = edge_representations.shape[0]
         
-        all_edge_representations.append(edge_repr)
+        # 从边表示中提取节点特征（前42维是源节点+目标节点特征）
+        # edge_representations结构：[src_node_features(42) + dst_node_features(42) + edge_features(16)]
+        src_features = edge_representations[:, :42]  # [num_edges, 42]
+        dst_features = edge_representations[:, 42:84]  # [num_edges, 42] 
+        edge_features = edge_representations[:, 84:]  # [num_edges, 16]
+        
+        # 重建节点特征矩阵
+        # 我们需要从边表示重构出唯一的节点特征
+        # 简化方法：使用边的源节点特征，按节点ID平均
+        node_features = torch.zeros(num_nodes, 42)
+        node_counts = torch.zeros(num_nodes)
+        
+        # 累加每个节点的特征
+        for j in range(num_edges):
+            src_id, dst_id = edge_index[0, j], edge_index[1, j]
+            node_features[src_id] += src_features[j]
+            node_features[dst_id] += dst_features[j]
+            node_counts[src_id] += 1
+            node_counts[dst_id] += 1
+        
+        # 计算平均值
+        node_counts[node_counts == 0] = 1  # 避免除零
+        node_features = node_features / node_counts.unsqueeze(1)
+        
+        all_node_features.append(node_features)
+        all_edge_features.append(edge_features)
+        all_edge_indices.append(edge_index + node_offset)
         all_affinities.append(sample['affinity'])
         
-        # 为每条边分配批次索引
-        batch_indices.extend([i] * num_edges)
+        # 批次索引
+        node_batch_indices.extend([i] * num_nodes)
+        edge_batch_indices.extend([i] * num_edges)
         
-        # 创建边索引：每条边连接到自己（ESA会在内部处理全连接注意力）
-        # 对于ESA，我们需要edge_index[0, :]来索引batch，所以创建自连接
-        edge_idx = torch.arange(current_edge_offset, current_edge_offset + num_edges, dtype=torch.long)
-        self_connections = torch.stack([edge_idx, edge_idx], dim=0)  # [2, num_edges]
-        edge_indices.append(self_connections)
-        
+        node_offset += num_nodes
+        max_nodes = max(max_nodes, num_nodes)
         max_edges = max(max_edges, num_edges)
-        total_edges += num_edges
-        current_edge_offset += num_edges
     
     # 拼接所有数据
-    x = torch.cat(all_edge_representations, dim=0)  # [total_edges, feature_dim]
-    batch_mapping = torch.tensor(batch_indices, dtype=torch.long)  # [total_edges]
+    x = torch.cat(all_node_features, dim=0)  # [total_nodes, 42]
+    edge_attr = torch.cat(all_edge_features, dim=0)  # [total_edges, 16]
+    edge_index = torch.cat(all_edge_indices, dim=1)  # [2, total_edges]
     y = torch.tensor(all_affinities, dtype=torch.float32)  # [batch_size]
-    edge_index = torch.cat(edge_indices, dim=1)  # [2, total_edges] - 自连接
+    node_batch = torch.tensor(node_batch_indices, dtype=torch.long)
+    edge_batch = torch.tensor(edge_batch_indices, dtype=torch.long)
     
     # 创建Data对象
     batch_data = Data(
-        x=x,                              # [total_edges, feature_dim] - 边表示作为节点
-        edge_index=edge_index,            # [2, total_edges] - 自连接用于batch索引
-        batch=batch_mapping,              # [total_edges] - 批次映射
-        y=y,                             # [batch_size] - 目标值
-        edge_attr=None
+        x=x,                    # [total_nodes, 42] - 节点特征
+        edge_index=edge_index,  # [2, total_edges] - 边连接
+        edge_attr=edge_attr,    # [total_edges, 16] - 边特征
+        batch=node_batch,       # [total_nodes] - 节点批次索引
+        y=y                     # [batch_size] - 目标值
     )
     
     # 添加ESA需要的全局属性
-    batch_data.max_node_global = torch.tensor([max_edges], dtype=torch.long)
-    batch_data.max_edge_global = torch.tensor([max_edges], dtype=torch.long)  # 边数等于节点数
-    batch_data.num_max_items = max_edges
+    def nearest_multiple_of_8(n):
+        return math.ceil(n / 8) * 8
+    
+    batch_data.max_node_global = torch.tensor([nearest_multiple_of_8(max_nodes + 1)], dtype=torch.long)
+    batch_data.max_edge_global = torch.tensor([nearest_multiple_of_8(max_edges + 1)], dtype=torch.long)
     
     return batch_data
 
@@ -175,22 +205,22 @@ class Stage1Trainer:
         
         feature_dims = metadata['feature_dimensions']
         
-        # 计算输入特征维度：node_dim * 2 + edge_dim
-        # (每条边由两个节点特征 + 边特征组成)
-        # 节点特征包括：原子类型one-hot编码(10维) + Fourier位置编码(32维) = 42维
-        # 因此我们实际上是在使用位置编码的，只是集成在节点特征中而非ESA内置编码器
-        input_dim = feature_dims['node_dim'] * 2 + feature_dims['edge_dim']
+        # 现在使用标准的节点-边图结构
+        # 节点特征：42维（原子类型10维 + 位置编码32维）
+        # 边特征：16维（Gaussian距离特征）
+        node_dim = feature_dims['node_dim']  # 42
+        edge_dim = feature_dims['edge_dim']  # 16
         
         print(f"模型配置:")
-        print(f"  输入特征维度: {input_dim}")
-        print(f"  节点特征维度: {feature_dims['node_dim']}")
-        print(f"  边特征维度: {feature_dims['edge_dim']}")
+        print(f"  节点特征维度: {node_dim}")
+        print(f"  边特征维度: {edge_dim}")
+        print(f"  使用Edge-Set Attention")
         
         model = Estimator(
             task_type="regression",
-            num_features=input_dim,
+            num_features=node_dim,  # 使用节点特征维度
             graph_dim=self.config['graph_dim'],
-            edge_dim=None,  # 边特征已经包含在输入中
+            edge_dim=edge_dim,  # 使用边特征维度
             batch_size=self.config['batch_size'],
             lr=self.config['learning_rate'],
             linear_output_size=1,
