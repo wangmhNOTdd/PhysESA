@@ -84,7 +84,7 @@ def main():
         'graph_dim': 128,
         'linear_output_size': 1,
         'monitor_loss_name': "val_loss",
-        'xformers_or_torch_attn': "torch",
+        'xformers_or_torch_attn': "xformers",
         'hidden_dims': [128, 128, 128],
         'num_heads': [8, 8, 8],
         'layer_types': ['M', 'S', 'M'], # 交错MAB和SAB
