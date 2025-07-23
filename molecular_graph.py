@@ -17,14 +17,18 @@ from typing import Tuple, Dict, List, Optional
 class MolecularGraphBuilder:
     """改进的分子图构建器 - 阶段一版本（重原子+氢原子特征）"""
     
-    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16):
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = False, k: int = 16):
         """
         Args:
             cutoff_radius: 原子间相互作用的截断半径 (Å)
             num_gaussians: 高斯基函数的数量
+            use_knn: 是否使用KNN连边方式
+            k: KNN中的k值（每个原子连接最近的k个原子）
         """
         self.cutoff_radius = cutoff_radius
         self.num_gaussians = num_gaussians
+        self.use_knn = use_knn
+        self.k = k
         
         # 重原子特征维度：原子类型(10) + 氢原子数(1) + 重原子邻居数(1) = 12
         self.atom_feature_dim = 12
@@ -242,6 +246,67 @@ class MolecularGraphBuilder:
         
         return gaussian_features
     
+    def build_knn_edges(self, positions: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        使用KNN方法构建边连接
+        
+        Args:
+            positions: [num_atoms, 3] 原子坐标
+            k: 每个原子连接最近的k个原子
+            
+        Returns:
+            edge_indices: [num_edges, 2] 边索引
+            edge_distances: [num_edges] 对应边的距离
+        """
+        num_atoms = positions.shape[0]
+        
+        # 计算距离矩阵
+        pos_expanded_i = positions.unsqueeze(1)  # [num_atoms, 1, 3]
+        pos_expanded_j = positions.unsqueeze(0)  # [1, num_atoms, 3]
+        distance_matrix = torch.norm(pos_expanded_i - pos_expanded_j, dim=2)  # [num_atoms, num_atoms]
+        
+        # 对每一行（每个原子），找到最近的k个原子（排除自身）
+        # 将对角线设为无穷大，避免选择自身
+        distance_matrix.fill_diagonal_(float('inf'))
+        
+        # 找到每个原子的k个最近邻
+        _, knn_indices = torch.topk(distance_matrix, k, dim=1, largest=False)  # [num_atoms, k]
+        
+        # 构建边索引
+        source_indices = torch.arange(num_atoms).unsqueeze(1).expand(-1, k)  # [num_atoms, k]
+        edge_indices = torch.stack([source_indices.flatten(), knn_indices.flatten()], dim=0).t()  # [num_edges, 2]
+        
+        # 获取对应的距离
+        edge_distances = distance_matrix[source_indices.flatten(), knn_indices.flatten()]  # [num_edges]
+        
+        return edge_indices, edge_distances
+    
+    def build_radius_edges(self, positions: torch.Tensor, cutoff_radius: float) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        使用截断半径方法构建边连接
+        
+        Args:
+            positions: [num_atoms, 3] 原子坐标
+            cutoff_radius: 截断半径
+            
+        Returns:
+            edge_indices: [num_edges, 2] 边索引
+            edge_distances: [num_edges] 对应边的距离
+        """
+        # 计算距离矩阵
+        pos_expanded_i = positions.unsqueeze(1)  # [num_atoms, 1, 3]
+        pos_expanded_j = positions.unsqueeze(0)  # [1, num_atoms, 3]
+        distance_matrix = torch.norm(pos_expanded_i - pos_expanded_j, dim=2)  # [num_atoms, num_atoms]
+        
+        # 找到在截断半径内的原子对
+        mask = (distance_matrix <= cutoff_radius) & (distance_matrix > 0)  # 排除自身
+        edge_indices = torch.nonzero(mask, as_tuple=False)  # [num_edges, 2]
+        
+        # 获取对应的距离值
+        edge_distances = distance_matrix[mask]  # [num_edges]
+        
+        return edge_indices, edge_distances
+    
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Data:
         """
         构建完整的分子图（只包含重原子）
@@ -276,23 +341,16 @@ class MolecularGraphBuilder:
         )
         atom_features = self.get_atom_features(protein_df, ligand_df)
         
-        # 计算原子间距离矩阵 - 优化版本
-        num_atoms = len(all_atoms_df)
-        
-        # 使用向量化计算距离矩阵
-        pos_expanded_i = positions.unsqueeze(1)  # [num_atoms, 1, 3]
-        pos_expanded_j = positions.unsqueeze(0)  # [1, num_atoms, 3]
-        distance_matrix = torch.norm(pos_expanded_i - pos_expanded_j, dim=2)  # [num_atoms, num_atoms]
-        
-        # 找到在截断半径内的原子对
-        mask = (distance_matrix <= self.cutoff_radius) & (distance_matrix > 0)  # 排除自身
-        edge_indices = torch.nonzero(mask, as_tuple=False)  # [num_edges, 2]
+        # 构建边连接：根据配置选择KNN或截断半径方式
+        if self.use_knn:
+            edge_indices, edge_distances = self.build_knn_edges(positions, self.k)
+            print(f"使用KNN连边 (k={self.k}): 边数={edge_indices.shape[0]}")
+        else:
+            edge_indices, edge_distances = self.build_radius_edges(positions, self.cutoff_radius)
+            print(f"使用截断半径连边 (r={self.cutoff_radius}Å): 边数={edge_indices.shape[0]}")
         
         if edge_indices.shape[0] == 0:
             raise ValueError(f"复合物 {complex_id} 没有找到任何相互作用边")
-        
-        # 获取对应的距离值
-        edge_distances = distance_matrix[mask]  # [num_edges]
         
         # 使用高斯基函数扩展距离特征
         edge_features = self.gaussian_basis_functions(edge_distances)  # [num_edges, num_gaussians]

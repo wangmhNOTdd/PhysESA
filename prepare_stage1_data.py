@@ -19,8 +19,8 @@ from molecular_graph import MolecularGraphBuilder, load_pdbbind_metadata
 class Stage1GraphBuilder(MolecularGraphBuilder):
     """阶段一简化版图构建器"""
     
-    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16):
-        super().__init__(cutoff_radius, num_gaussians)
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = True, k: int = 16):
+        super().__init__(cutoff_radius, num_gaussians, use_knn, k)
         # 阶段一：简化特征维度
         # 原子特征：只使用原子类型独热编码 (10维)
         self.atom_feature_dim = 10
@@ -79,14 +79,21 @@ def prepare_split_data(
             split_data = json.load(f)
         
         train_ids = split_data.get('train', [])
-        val_ids = split_data.get('val', [])
+        val_ids = split_data.get('val', split_data.get('valid', []))  # 兼容不同命名
         test_ids = split_data.get('test', [])
+        
+        # 如果预定义分割中没有验证集，从训练集中分出一部分
+        if len(val_ids) == 0 and len(train_ids) > 0:
+            print("预定义分割中没有验证集，从训练集分出10%作为验证集")
+            n_val = max(1, len(train_ids) // 10)  # 至少1个样本
+            val_ids = train_ids[-n_val:]
+            train_ids = train_ids[:-n_val]
         
         # 限制样本数量（用于调试）
         if max_samples_per_split:
             train_ids = train_ids[:max_samples_per_split]
-            val_ids = val_ids[:max_samples_per_split//4]  # 验证集较小
-            test_ids = test_ids[:max_samples_per_split//4]  # 测试集较小
+            val_ids = val_ids[:max(1, max_samples_per_split//10)]  # 验证集至少1个
+            test_ids = test_ids[:max(1, max_samples_per_split//10)]  # 测试集至少1个
             
     else:
         print("使用简单的8:1:1分割")
@@ -207,9 +214,15 @@ def main():
                        choices=['scaffold_split', 'identity30_split', 'identity60_split'],
                        help='数据分割类型')
     parser.add_argument('--cutoff_radius', type=float, default=5.0,
-                       help='原子相互作用截断半径')
+                       help='原子相互作用截断半径（仅在使用radius模式时生效）')
     parser.add_argument('--num_gaussians', type=int, default=16,
                        help='高斯基函数数量')
+    parser.add_argument('--use_knn', action='store_true', default=True,
+                       help='使用KNN连边方式（默认启用）')
+    parser.add_argument('--use_radius', action='store_true',
+                       help='使用截断半径连边方式（覆盖--use_knn）')
+    parser.add_argument('--k', type=int, default=16,
+                       help='KNN中的k值（每个原子连接最近的k个原子）')
     parser.add_argument('--max_samples', type=int, default=None,
                        help='每个分割的最大样本数（用于调试）')
     parser.add_argument('--test_run', action='store_true',
@@ -222,6 +235,11 @@ def main():
         args.max_samples = 50
         print("*** 测试运行模式：仅处理50个样本 ***")
     
+    # 确定连边方式
+    use_knn = args.use_knn and not args.use_radius  # 如果指定了use_radius，就不用KNN
+    
+    print(f"连边方式: {'KNN (k={})'.format(args.k) if use_knn else '截断半径 (r={}Å)'.format(args.cutoff_radius)}")
+    
     # 检查数据目录
     if not os.path.exists(args.data_root):
         raise ValueError(f"数据目录不存在: {args.data_root}")
@@ -232,7 +250,9 @@ def main():
     # 初始化图构建器
     graph_builder = Stage1GraphBuilder(
         cutoff_radius=args.cutoff_radius,
-        num_gaussians=args.num_gaussians
+        num_gaussians=args.num_gaussians,
+        use_knn=use_knn,
+        k=args.k
     )
     
     # 加载元数据
@@ -324,6 +344,11 @@ def main():
         'cutoff_radius': args.cutoff_radius,
         'num_gaussians': args.num_gaussians,
         'split_type': args.split_type,
+        'edge_connection': {
+            'method': 'knn' if use_knn else 'radius',
+            'k': args.k if use_knn else None,
+            'radius': args.cutoff_radius if not use_knn else None
+        },
         'data_format': 'esa_edge_representations'
     }
     

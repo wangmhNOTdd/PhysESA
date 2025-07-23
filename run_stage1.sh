@@ -42,7 +42,9 @@ if [ -f "./experiments/stage1/train.pkl" ] || [ -f "./experiments/stage1/valid.p
             --output_dir ./experiments/stage1 \
             --split_type scaffold_split \
             --cutoff_radius 5.0 \
-            --num_gaussians 16
+            --num_gaussians 16 \
+            --use_knn \
+            --k 16
     else
         echo "使用现有数据"
     fi
@@ -53,7 +55,9 @@ else
         --output_dir ./experiments/stage1 \
         --split_type scaffold_split \
         --cutoff_radius 5.0 \
-        --num_gaussians 16
+        --num_gaussians 16 \
+        --use_knn \
+        --k 16
 fi
 
 # 检查数据预处理是否成功

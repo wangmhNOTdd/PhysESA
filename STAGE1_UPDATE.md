@@ -1,6 +1,27 @@
-# 阶段一实验更新总结
+# 阶段一实验更新总结 (v1.1 - KNN连边和验证集修复)
 
-## 更新内容
+## 最新更新 (v1.1)
+
+### 🔧 **重要修复**
+
+1. **验证集生成问题修复**
+   - 修复了预定义分割文件中缺少验证集的问题
+   - 如果预定义分割中没有验证集，自动从训练集分出10%作为验证集
+   - 确保训练/验证/测试三个数据文件都能正确生成
+
+2. **连边方式改为KNN**
+   - 默认使用KNN连边方式（每个原子连接最近的16个邻居）
+   - 相比截断半径方式，KNN确保每个原子有固定数量的邻居
+   - 避免了大分子中边数过多的问题，提高训练稳定性
+
+### 🚀 **新功能**
+
+- 支持KNN和截断半径两种连边方式
+- 可配置的K值（默认k=16）
+- 更详细的元数据记录（包含连边方式信息）
+- 改进的数据分割逻辑，确保验证集存在
+
+## 原始更新内容 (v1.0)
 
 本次更新为阶段一实验提供了完整的数据处理和训练流程。主要更新包括：
 
@@ -26,7 +47,7 @@
    - `experiments/stage1/config_template.json` - 配置模板
    - `test_stage1.py` - 系统测试脚本
 
-### 关键特征简化
+### 关键特征简化 (v1.1)
 
 按照Readme.md中阶段一的要求：
 
@@ -35,17 +56,21 @@
 - 支持：C, N, O, S, P, F, Cl, Br, I, Other
 
 #### 边特征（16维）  
-- 只使用高斯基函数扩展的距离
-- 16个高斯基函数，覆盖0-5Å范围
+- **连边方式**: KNN (k=16) - 每个原子连接最近的16个原子
+- **距离特征**: 高斯基函数扩展距离
+- **优势**: 
+  - 固定邻居数量，避免大分子边数过多
+  - 更稳定的训练过程
+  - 计算效率更高
 
 #### 模型架构
 - 只使用MAB层（掩码自注意力）
 - 不使用SAB层
 - 标准PMA池化
 
-## 使用方法
+### 使用方法 (v1.1)
 
-### Linux服务器上运行
+#### Linux服务器上运行
 
 ```bash
 # 测试运行（推荐先执行）
@@ -53,21 +78,32 @@ bash run_stage1.sh test
 
 # 完整训练
 bash run_stage1.sh
+
+# 快速测试修复效果
+bash test_fix.sh
 ```
 
-### 手动步骤
+#### 手动步骤
 
 ```bash
-# 1. 数据预处理
+# 1. 数据预处理 (KNN连边)
 python prepare_stage1_data.py \
     --data_root ./datasets/pdbbind \
     --output_dir ./experiments/stage1 \
+    --use_knn --k 16 \
     --test_run  # 快速测试
 
-# 2. 系统测试
+# 2. 如果需要使用截断半径连边
+python prepare_stage1_data.py \
+    --data_root ./datasets/pdbbind \
+    --output_dir ./experiments/stage1 \
+    --use_radius \
+    --cutoff_radius 5.0
+
+# 3. 系统测试
 python test_stage1.py
 
-# 3. 模型训练
+# 4. 模型训练
 python ./experiments/stage1/train_stage1.py \
     --data_dir ./experiments/stage1 \
     --output_dir ./experiments/stage1/checkpoints \
