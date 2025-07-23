@@ -156,9 +156,9 @@ class Estimator(pl.LightningModule):
         self.rwse_encoder = None
         self.lap_encoder = None
 
-        if "RWSE" in self.posenc:
+        if self.posenc and "RWSE" in self.posenc:
             self.rwse_encoder = KernelPENodeEncoder()
-        if "LapPE" in self.posenc:
+        if self.posenc and "LapPE" in self.posenc:
             self.lap_encoder = LapPENodeEncoder()
  
         if self.norm_type == "BN":
