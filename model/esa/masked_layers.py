@@ -705,6 +705,8 @@ class Estimator(nn.Module):
         # Handle parameter name mapping and extract specific args
         dim_output = kwargs.pop('linear_output_size', 1)
         use_bfloat16 = kwargs.pop('use_fp16', True)
+        # This is a high-level config param not used by the core ESA model
+        kwargs.pop('task_type', None)
 
         # The core attention model
         self.st_fast = ESA(
