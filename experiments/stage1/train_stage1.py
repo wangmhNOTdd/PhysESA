@@ -62,9 +62,11 @@ def collate_fn(batch: List[Dict]) -> Data:
     all_edge_representations = []
     all_affinities = []
     batch_indices = []
+    edge_indices = []
     
     max_edges = 0
     total_edges = 0
+    current_edge_offset = 0
     
     for i, sample in enumerate(batch):
         edge_repr = sample['edge_representations']  # [num_edges, feature_dim]
@@ -76,22 +78,26 @@ def collate_fn(batch: List[Dict]) -> Data:
         # 为每条边分配批次索引
         batch_indices.extend([i] * num_edges)
         
+        # 创建边索引：每条边连接到自己（ESA会在内部处理全连接注意力）
+        # 对于ESA，我们需要edge_index[0, :]来索引batch，所以创建自连接
+        edge_idx = torch.arange(current_edge_offset, current_edge_offset + num_edges, dtype=torch.long)
+        self_connections = torch.stack([edge_idx, edge_idx], dim=0)  # [2, num_edges]
+        edge_indices.append(self_connections)
+        
         max_edges = max(max_edges, num_edges)
         total_edges += num_edges
+        current_edge_offset += num_edges
     
-    # 拼接所有边表示
+    # 拼接所有数据
     x = torch.cat(all_edge_representations, dim=0)  # [total_edges, feature_dim]
     batch_mapping = torch.tensor(batch_indices, dtype=torch.long)  # [total_edges]
     y = torch.tensor(all_affinities, dtype=torch.float32)  # [batch_size]
-    
-    # 创建空的边连接（ESA模型会在内部处理注意力）
-    # 对于ESA，我们不需要显式的图连接，因为它使用全连接注意力
-    edge_index = torch.empty((2, 0), dtype=torch.long)
+    edge_index = torch.cat(edge_indices, dim=1)  # [2, total_edges] - 自连接
     
     # 创建Data对象
     batch_data = Data(
         x=x,                              # [total_edges, feature_dim] - 边表示作为节点
-        edge_index=edge_index,            # [2, 0] - 空的边连接
+        edge_index=edge_index,            # [2, total_edges] - 自连接用于batch索引
         batch=batch_mapping,              # [total_edges] - 批次映射
         y=y,                             # [batch_size] - 目标值
         edge_attr=None
@@ -99,7 +105,7 @@ def collate_fn(batch: List[Dict]) -> Data:
     
     # 添加ESA需要的全局属性
     batch_data.max_node_global = torch.tensor([max_edges], dtype=torch.long)
-    batch_data.max_edge_global = torch.tensor([0], dtype=torch.long)  # 我们没有边连接
+    batch_data.max_edge_global = torch.tensor([max_edges], dtype=torch.long)  # 边数等于节点数
     batch_data.num_max_items = max_edges
     
     return batch_data
