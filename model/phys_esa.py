@@ -70,7 +70,13 @@ class PhysESA(pl.LightningModule):
         h = self.esa_model.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items)
         
         # 4. 得到最终预测
-        predictions = torch.flatten(self.esa_model.output_mlp(h))
+        # The output from ESA (st_fast) is (batch_size, num_inds, hidden_dim).
+        # It needs to be flattened before being passed to the final MLP.
+        h = torch.flatten(h, start_dim=1)
+        
+        # The output_mlp then maps from (batch_size, num_inds * hidden_dim) to (batch_size, out_dim).
+        predictions = self.esa_model.output_mlp(h)
+        
         return predictions
 
     def _common_step(self, batch, batch_idx):
