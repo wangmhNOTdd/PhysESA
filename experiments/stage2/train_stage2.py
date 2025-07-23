@@ -74,12 +74,12 @@ def main():
         'learning_rate': 1e-4,
         'weight_decay': 1e-5,
         'lr_patience': 10,
-        'batch_size': 8,
+        'batch_size': 16,
         'max_epochs': 100,
         'patience': 15,
         'grad_clip': 1.0,
         'use_fp16': True,
-        'num_workers': 4
+        'num_workers': 8
     }
     
     # 默认ESA模型配置
@@ -89,7 +89,7 @@ def main():
         # --- ESA model parameters ---
         'hidden_dims': [128, 128, 128, 128],
         'num_heads': [8, 8, 8, 8],
-        'layer_types': ['M', 'S', 'P', 'S'],
+        'layer_types': ['M', 'S', 'M', 'S', 'P', 'S'],
         'num_inds': 32,
         'set_max_items': 0, # This will be set dynamically later
         'linear_output_size': 1,
