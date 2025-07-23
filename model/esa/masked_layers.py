@@ -680,46 +680,77 @@ class ESA(nn.Module):
 
 class Estimator(nn.Module):
     """
-    An adapter class that wraps the complex ESA model with a simpler interface,
-    matching the one expected by the original training scripts. It handles the
-    conversion of simple parameters into the detailed configuration needed by ESA
-    and encapsulates the graph processing logic.
+    An adapter class that wraps the complex ESA model with a simpler interface.
+    It has a strict API and will raise a TypeError if unexpected configuration
+    parameters are passed from the training script.
     """
     def __init__(
         self,
-        graph_dim,
-        num_features,
-        edge_dim,
-        num_heads,
-        hidden_dims,
-        layer_types,
-        num_inds,
-        set_max_items,
-        **kwargs
+        # --- Parameters for Estimator's MLP ---
+        graph_dim: int,
+        num_features: int,
+        edge_dim: int,
+        # --- Parameters for ESA model ---
+        hidden_dims: list,
+        num_heads: list,
+        layer_types: list,
+        num_inds: int,
+        set_max_items: int,
+        linear_output_size: int = 1,
+        use_fp16: bool = True,
+        node_or_edge: str = "edge",
+        xformers_or_torch_attn: str = "xformers",
+        pre_or_post: str = "pre",
+        norm_type: str = "LN",
+        sab_dropout: float = 0.0,
+        mab_dropout: float = 0.0,
+        pma_dropout: float = 0.0,
+        residual_dropout: float = 0.0,
+        pma_residual_dropout: float = 0.0,
+        use_mlps: bool = False,
+        mlp_hidden_size: int = 64,
+        num_mlp_layers: int = 2,
+        mlp_type: str = "gated_mlp",
+        mlp_dropout: float = 0.0,
+        use_mlp_ln: bool = False,
+        # --- High-level config params that are now explicitly ignored ---
+        # We accept them in the signature to prevent TypeErrors from the old config,
+        # but they are not used inside the model itself.
+        task_type: str = None,
+        monitor_loss_name: str = None,
+        regression_loss_fn: str = None,
+        posenc: str = None,
+        apply_attention_on: str = None # To catch the old name
     ):
         super().__init__()
         # Store key parameters for access by other modules if needed
         self.hidden_dim = graph_dim
         self.num_inds = num_inds
 
-        # Handle parameter name mapping and extract specific args
-        dim_output = kwargs.pop('linear_output_size', 1)
-        use_bfloat16 = kwargs.pop('use_fp16', True)
-        # These are high-level config params not used by the core ESA model
-        kwargs.pop('task_type', None)
-        kwargs.pop('monitor_loss_name', None)
-
         # The core attention model
         self.st_fast = ESA(
             num_outputs=num_inds,
-            dim_output=dim_output,
+            dim_output=linear_output_size,
             dim_hidden=hidden_dims,
             num_heads=num_heads,
             layer_types=layer_types,
             set_max_items=set_max_items,
-            use_bfloat16=use_bfloat16,
-            # All other ESA parameters are passed via kwargs
-            **kwargs
+            use_bfloat16=use_fp16,
+            node_or_edge=node_or_edge,
+            xformers_or_torch_attn=xformers_or_torch_attn,
+            pre_or_post=pre_or_post,
+            norm_type=norm_type,
+            sab_dropout=sab_dropout,
+            mab_dropout=mab_dropout,
+            pma_dropout=pma_dropout,
+            residual_dropout=residual_dropout,
+            pma_residual_dropout=pma_residual_dropout,
+            use_mlps=use_mlps,
+            mlp_hidden_size=mlp_hidden_size,
+            num_mlp_layers=num_mlp_layers,
+            mlp_type=mlp_type,
+            mlp_dropout=mlp_dropout,
+            use_mlp_ln=use_mlp_ln,
         )
 
         # MLP to process combined node and edge features before attention

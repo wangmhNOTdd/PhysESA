@@ -83,24 +83,31 @@ def main():
     
     # 默认ESA模型配置
     esa_config = {
-        'task_type': "regression",
+        # --- Estimator's MLP parameters ---
         'graph_dim': 128,
+        # --- ESA model parameters ---
+        'hidden_dims': [128, 128, 128, 128],
+        'num_heads': [8, 8, 8, 8],
+        'layer_types': ['M', 'S', 'P', 'S'],
+        'num_inds': 32,
+        'set_max_items': 0, # This will be set dynamically later
         'linear_output_size': 1,
-        'monitor_loss_name': "val_loss",
+        'use_fp16': True, # Corresponds to training_config
+        'node_or_edge': "edge", # Renamed from apply_attention_on
         'xformers_or_torch_attn': "xformers",
-        'hidden_dims': [128, 128, 128, 128],  # 为新层添加了维度
-        'num_heads': [8, 8, 8, 8],          # 为新层添加了头
-        'layer_types': ['M', 'S', 'P', 'S'], # 编码器 -> 池化器 -> 解码器
-        'num_inds': 32,                     # PMA的种子向量数量
+        'pre_or_post': "pre",
+        'norm_type': "LN",
         'sab_dropout': 0.1,
         'mab_dropout': 0.1,
         'pma_dropout': 0.1,
-        'apply_attention_on': "edge",
+        'residual_dropout': 0.0,
+        'pma_residual_dropout': 0.0,
         'use_mlps': True,
+        'mlp_hidden_size': 128, # A sensible default
+        'num_mlp_layers': 2,
         'mlp_type': "gated_mlp",
-        'norm_type': "LN",
-        'regression_loss_fn': "mse",
-        'posenc': ""
+        'mlp_dropout': 0.1, # A sensible default
+        'use_mlp_ln': False,
     }
 
     # --- 2. 准备数据加载器 ---
