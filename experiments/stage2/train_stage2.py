@@ -74,7 +74,7 @@ def main():
         'learning_rate': 1e-4,
         'weight_decay': 1e-5,
         'lr_patience': 10,
-        'batch_size': 16,
+        'batch_size': 8,
         'max_epochs': 100,
         'patience': 15,
         'grad_clip': 1.0,
