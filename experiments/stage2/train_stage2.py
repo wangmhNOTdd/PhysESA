@@ -55,6 +55,7 @@ def main():
     parser.add_argument('--data_dir', type=str, default='./experiments/stage2', help='数据目录')
     parser.add_argument('--output_dir', type=str, default='./experiments/stage2/checkpoints', help='输出目录')
     parser.add_argument('--config', type=str, default=None, help='配置文件路径（可选）')
+    parser.add_argument('--checkpoint', type=str, default=None, help='模型检查点路径，用于测试模式')
     # ... (可以添加更多命令行参数来覆盖配置)
     args = parser.parse_args()
 
@@ -113,10 +114,11 @@ def main():
     # --- 2. 准备数据加载器 ---
     train_dataset = Stage2Dataset(os.path.join(args.data_dir, 'train.pkl'))
     val_dataset = Stage2Dataset(os.path.join(args.data_dir, 'valid.pkl'))
+    test_dataset = Stage2Dataset(os.path.join(args.data_dir, 'test.pkl'))
     
     # 计算全局最大节点/边数
-    all_node_counts = [data.num_nodes for data in train_dataset.data + val_dataset.data]
-    all_edge_counts = [data.num_edges for data in train_dataset.data + val_dataset.data]
+    all_node_counts = [data.num_nodes for data in train_dataset.data + val_dataset.data + test_dataset.data]
+    all_edge_counts = [data.num_edges for data in train_dataset.data + val_dataset.data + test_dataset.data]
     
     # 关键修复：预先计算最终的填充尺寸，并将其传递给所有组件
     def nearest_multiple_of_8(n):
@@ -135,6 +137,7 @@ def main():
     
     train_loader = DataLoader(train_dataset, batch_size=training_config['batch_size'], shuffle=True, num_workers=training_config['num_workers'], collate_fn=collater)
     val_loader = DataLoader(val_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
+    test_loader = DataLoader(test_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
 
     # --- 3. 初始化模型 ---
     model = PhysESA(
@@ -169,11 +172,21 @@ def main():
         gradient_clip_val=training_config['grad_clip']
     )
 
-    # --- 5. 开始训练 ---
-    print("开始训练PhysESA模型...")
-    trainer.fit(model, train_loader, val_loader)
-    
-    print(f"训练完成！模型保存在: {args.output_dir}")
+    # --- 5. 开始训练或测试 ---
+    if args.checkpoint:
+        print(f"开始测试模型: {args.checkpoint}")
+        # 加载模型时，需要传递原始的配置参数，因为它们保存在hyperparameters中
+        model_for_test = PhysESA.load_from_checkpoint(
+            args.checkpoint,
+            esa_config=esa_config,
+            training_config=training_config,
+            graph_builder_config=metadata['graph_builder_config']
+        )
+        trainer.test(model_for_test, dataloaders=test_loader)
+    else:
+        print("开始训练PhysESA模型...")
+        trainer.fit(model, train_loader, val_loader)
+        print(f"训练完成！模型保存在: {args.output_dir}")
 
 if __name__ == "__main__":
     main()

@@ -7,6 +7,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from torch_geometric.data import Batch
 from torch.nn import functional as F
+from torchmetrics import R2Score, MeanSquaredError, MeanAbsoluteError
 
 # Correctly import the Estimator which will act as our main model interface
 from model.esa.masked_layers import Estimator
@@ -41,6 +42,11 @@ class PhysESA(pl.LightningModule):
         # PhysESA's role is to simply host it within the Lightning framework.
         self.esa_model = Estimator(**esa_config)
 
+        # Metrics for testing
+        self.r2 = R2Score()
+        self.rmse = MeanSquaredError(squared=False)
+        self.mae = MeanAbsoluteError()
+
     def forward(self, batch: Batch) -> torch.Tensor:
         """
         The forward pass is now greatly simplified.
@@ -72,7 +78,25 @@ class PhysESA(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         loss, y_pred, y_true = self._common_step(batch, batch_idx)
         self.log('test_loss', loss, on_step=False, on_epoch=True, logger=True, batch_size=batch.num_graphs)
+        
+        # Update metrics
+        self.r2(y_pred, y_true.squeeze())
+        self.rmse(y_pred, y_true.squeeze())
+        self.mae(y_pred, y_true.squeeze())
+        
         return loss
+
+    def on_test_epoch_end(self):
+        """
+        Compute and log final metrics at the end of the test epoch.
+        """
+        print("\n" + "="*30)
+        print("      Test Results      ")
+        print("="*30)
+        print(f"  R² Score: {self.r2.compute():.4f}")
+        print(f"  RMSE:     {self.rmse.compute():.4f}")
+        print(f"  MAE:      {self.mae.compute():.4f}")
+        print("="*30)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
