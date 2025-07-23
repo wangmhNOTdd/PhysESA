@@ -87,8 +87,8 @@ def main():
         # --- Estimator's MLP parameters ---
         'graph_dim': 128,
         # --- ESA model parameters ---
-        'hidden_dims': [128, 128, 128, 128],
-        'num_heads': [8, 8, 8, 8],
+        'hidden_dims': [128, 128, 128, 128, 128, 128],
+        'num_heads': [8, 8, 8, 8, 8, 8],
         'layer_types': ['M', 'S', 'M', 'S', 'P', 'S'],
         'num_inds': 32,
         'set_max_items': 0, # This will be set dynamically later
