@@ -56,41 +56,53 @@ class Stage1Dataset(Dataset):
 
 def collate_fn(batch: List[Dict]) -> Data:
     """
-    自定义collate函数，处理变长的边表示并创建PyG兼容的Data对象
+    自定义collate函数，手动处理batch避免维度冲突
     """
     # 收集所有数据
-    data_list = []
+    edge_representations = []
+    affinities = []
+    batch_indices = []
+    edge_indices = []
+    num_edges_list = []
+    
+    current_offset = 0
     
     for i, sample in enumerate(batch):
         edge_repr = sample['edge_representations']  # [num_edges, feature_dim]
-        num_nodes = sample['num_nodes'] 
+        edge_representations.append(edge_repr)
+        affinities.append(sample['affinity'])
+        
+        # 为每条边分配批次索引
         num_edges = edge_repr.shape[0]
-        edge_index = sample['edge_index']
+        batch_indices.extend([i] * num_edges)
+        num_edges_list.append(num_edges)
         
-        # 创建单个Data对象
-        data = Data(
-            x=edge_repr,                    # [num_edges, feature_dim] - 在ESA中边被当作节点
-            edge_index=edge_index,          # [2, num_edges]
-            y=torch.tensor([sample['affinity']], dtype=torch.float32),  # [1]
-            num_nodes=num_edges,            # ESA中的"节点"实际上是边
-            num_edges=edge_index.shape[1]   # 原始图的边数
-        )
-        
-        # 添加全局统计信息（ESA模型需要的）
-        data.max_node_global = torch.tensor([num_edges], dtype=torch.long)  # 最大边数（作为节点）
-        data.max_edge_global = torch.tensor([edge_index.shape[1]], dtype=torch.long)  # 边的边数
-        
-        data_list.append(data)
+        # 更新边索引（加上偏移量，因为我们要拼接所有边）
+        edge_index = sample['edge_index'] + current_offset
+        edge_indices.append(edge_index)
+        current_offset += sample['num_nodes']
     
-    # 使用PyG的Batch.from_data_list来正确合并
-    batch_data = Batch.from_data_list(data_list)
+    # 拼接所有边表示
+    edge_representations = torch.cat(edge_representations, dim=0)  # [total_edges, feature_dim]
+    batch_indices = torch.tensor(batch_indices, dtype=torch.long)   # [total_edges]
+    affinities = torch.tensor(affinities, dtype=torch.float32)      # [batch_size]
+    edge_indices = torch.cat(edge_indices, dim=1)                   # [2, total_edges]
     
-    # 计算全局最大值
-    max_node_counts = [data.max_node_global.item() for data in data_list]
-    max_edge_counts = [data.max_edge_global.item() for data in data_list]
+    # 计算最大边数
+    max_edges = max(num_edges_list)
     
-    batch_data.max_node_global = torch.tensor([max(max_node_counts)], dtype=torch.long)
-    batch_data.max_edge_global = torch.tensor([max(max_edge_counts)], dtype=torch.long)
+    # 创建PyG Data对象（手动设置所有必需属性）
+    batch_data = Data(
+        x=edge_representations,           # [total_edges, feature_dim]
+        edge_index=edge_indices,          # [2, total_edges] 
+        batch=batch_indices,              # [total_edges]
+        y=affinities,                     # [batch_size]
+        edge_attr=None                    # 在edge_representations中已包含
+    )
+    
+    # 添加ESA模型需要的全局属性
+    batch_data.max_node_global = torch.tensor([max_edges], dtype=torch.long)  # 最大边数
+    batch_data.max_edge_global = torch.tensor([max_edges], dtype=torch.long)  # 保持一致
     
     return batch_data
 
