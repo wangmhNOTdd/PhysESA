@@ -55,47 +55,33 @@ class Stage1Dataset(Dataset):
         return self.data[idx]
 
 
-def collate_fn(batch: List[Dict]) -> Batch:
+class Collater:
     """
-    自定义collate函数，为ESA模型准备标准格式的图数据
-    直接使用预处理好的节点/边特征，而不是从edge_representations重构
+    自定义collate类，为ESA模型准备标准格式的图数据
     """
-    data_list = []
-    max_nodes = 0
-    max_edges = 0
+    def __init__(self, global_max_edges: int, global_max_nodes: int):
+        self.global_max_edges = global_max_edges
+        self.global_max_nodes = global_max_nodes
 
-    for sample in batch:
-        # 直接使用预处理好的特征
-        node_features = sample['node_features']
-        edge_features = sample['edge_features']
-        edge_index = sample['edge_index']
-        affinity = sample['affinity']
-        num_nodes = sample['num_nodes']
-        num_edges = sample['num_edges']
+    def __call__(self, batch: List[Dict]) -> Batch:
+        data_list = []
+        for sample in batch:
+            data = Data(
+                x=sample['node_features'],
+                edge_index=sample['edge_index'],
+                edge_attr=sample['edge_features'],
+                y=torch.tensor([sample['affinity']], dtype=torch.float32)
+            )
+            data_list.append(data)
 
-        data = Data(
-            x=node_features,
-            edge_index=edge_index,
-            edge_attr=edge_features,
-            y=torch.tensor([affinity], dtype=torch.float32)
-        )
-        data_list.append(data)
+        batch_data = Batch.from_data_list(data_list)
         
-        max_nodes = max(max_nodes, num_nodes)
-        max_edges = max(max_edges, num_edges)
-
-    # 使用torch_geometric的Batch类自动处理批处理
-    batch_data = Batch.from_data_list(data_list)
-    
-    # 添加ESA需要的全局属性
-    def nearest_multiple_of_8(n):
-        return math.ceil(n / 8) * 8
-    
-    # 注意：这里的max_node/edge_global是整个批次中单个图的最大值，而不是总和
-    batch_data.max_node_global = torch.tensor([nearest_multiple_of_8(max_nodes + 1)], dtype=torch.long)
-    batch_data.max_edge_global = torch.tensor([nearest_multiple_of_8(max_edges + 1)], dtype=torch.long)
-    
-    return batch_data
+        # 关键修复：使用全局最大值来设置批次属性
+        # 这确保了to_dense_batch使用与模型初始化时相同的维度
+        batch_data.max_node_global = torch.tensor([self.global_max_nodes], dtype=torch.long)
+        batch_data.max_edge_global = torch.tensor([self.global_max_edges], dtype=torch.long)
+        
+        return batch_data
 
 
 class Stage1Trainer:
@@ -109,13 +95,35 @@ class Stage1Trainer:
         self.val_dataset = Stage1Dataset(config['val_data_path'])
         self.test_dataset = Stage1Dataset(config['test_data_path'])
         
+        # 计算全局最大节点数和边数
+        all_node_counts = []
+        all_edge_counts = []
+        for dataset in [self.train_dataset, self.val_dataset, self.test_dataset]:
+            node_counts = [sample['num_nodes'] for sample in dataset.data]
+            edge_counts = [sample['num_edges'] for sample in dataset.data]
+            all_node_counts.extend(node_counts)
+            all_edge_counts.extend(edge_counts)
+        
+        def nearest_multiple_of_8(n):
+            return math.ceil(n / 8) * 8
+        
+        raw_max_nodes = max(all_node_counts) if all_node_counts else 0
+        raw_max_edges = max(all_edge_counts) if all_edge_counts else 0
+        self.max_nodes = nearest_multiple_of_8(raw_max_nodes + 1)
+        self.max_edges = nearest_multiple_of_8(raw_max_edges + 1)
+        print(f"全局最大节点数: {raw_max_nodes} -> 对齐后: {self.max_nodes}")
+        print(f"全局最大边数: {raw_max_edges} -> 对齐后: {self.max_edges}")
+
+        # 创建Collater实例
+        collater = Collater(global_max_edges=self.max_edges, global_max_nodes=self.max_nodes)
+
         # 创建数据加载器
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=config['batch_size'],
             shuffle=True,
             num_workers=config['num_workers'],
-            collate_fn=collate_fn,
+            collate_fn=collater,
             persistent_workers=True if config['num_workers'] > 0 else False
         )
         
@@ -124,7 +132,7 @@ class Stage1Trainer:
             batch_size=config['batch_size'],
             shuffle=False,
             num_workers=config['num_workers'],
-            collate_fn=collate_fn,
+            collate_fn=collater,
             persistent_workers=True if config['num_workers'] > 0 else False
         )
         
@@ -133,23 +141,9 @@ class Stage1Trainer:
             batch_size=config['batch_size'],
             shuffle=False,
             num_workers=config['num_workers'],
-            collate_fn=collate_fn,
+            collate_fn=collater,
             persistent_workers=True if config['num_workers'] > 0 else False
         )
-        
-        # 计算最大边数（用于设置模型参数）
-        all_edge_counts = []
-        for dataset in [self.train_dataset, self.val_dataset, self.test_dataset]:
-            edge_counts = [sample['num_edges'] for sample in dataset.data]
-            all_edge_counts.extend(edge_counts)
-        
-        # 使用nearest_multiple_of_8确保与ESA模型内部计算一致
-        def nearest_multiple_of_8(n):
-            return math.ceil(n / 8) * 8
-        
-        raw_max_edges = max(all_edge_counts)
-        self.max_edges = nearest_multiple_of_8(raw_max_edges + 1)  # +1 like in ESA model
-        print(f"数据集最大边数: {raw_max_edges} -> 对齐后: {self.max_edges}")
         
     def create_model(self) -> Estimator:
         """创建ESA模型"""
@@ -194,7 +188,7 @@ class Stage1Trainer:
             mlp_hidden_size=128,
             mlp_type="standard",
             norm_type="LN",  # 使用Layer Norm（ESA模型识别的格式）
-            set_max_items=self.max_edges,
+            set_max_items=self.max_edges, # ESA内部使用此参数创建固定大小的掩码
             early_stopping_patience=self.config['patience'],
             optimiser_weight_decay=self.config['weight_decay'],
             regression_loss_fn="mse",
