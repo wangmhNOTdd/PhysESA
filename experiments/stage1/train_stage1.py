@@ -178,7 +178,7 @@ class Stage1Trainer:
             monitor_loss_name="val_loss",
             xformers_or_torch_attn="torch",  # 使用torch原生注意力
             hidden_dims=self.config['hidden_dims'],
-            num_heads=self.config['num_heads'],
+            num_heads=[self.config['num_heads']] * len(self.config['layer_types']),  # 为每层指定头数
             num_sabs=self.config['num_sabs'],
             sab_dropout=self.config['sab_dropout'],
             mab_dropout=self.config['mab_dropout'],

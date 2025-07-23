@@ -156,17 +156,14 @@ class Estimator(pl.LightningModule):
         self.rwse_encoder = None
         self.lap_encoder = None
 
-        if self.posenc and "RWSE" in self.posenc:
+        if "RWSE" in self.posenc:
             self.rwse_encoder = KernelPENodeEncoder()
-        if self.posenc and "LapPE" in self.posenc:
+        if "LapPE" in self.posenc:
             self.lap_encoder = LapPENodeEncoder()
  
         if self.norm_type == "BN":
             norm_fn = BN
-        elif self.norm_type == "LN" or self.norm_type == "layer_norm":
-            norm_fn = LN
-        else:
-            # 默认使用LayerNorm
+        elif self.norm_type == "LN":
             norm_fn = LN
 
         if self.apply_attention_on == "node":
