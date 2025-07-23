@@ -19,44 +19,64 @@ from molecular_graph import MolecularGraphBuilder, load_pdbbind_metadata
 class Stage1GraphBuilder(MolecularGraphBuilder):
     """阶段一简化版图构建器"""
     
-    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = True, k: int = 16):
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = True, k: int = 16, 
+                 use_positional_encoding: bool = True, pe_dim: int = 32):
         super().__init__(cutoff_radius, num_gaussians, use_knn, k)
         # 阶段一：简化特征维度
-        # 原子特征：只使用原子类型独热编码 (10维)
-        self.atom_feature_dim = 10
+        # 原子特征：原子类型独热编码 (10维) + 位置编码 (pe_dim维)
+        self.use_positional_encoding = use_positional_encoding
+        self.pe_dim = pe_dim
+        self.atom_feature_dim = 10 + (pe_dim if use_positional_encoding else 0)
         
     def get_atom_features(self, protein_df, ligand_df) -> torch.Tensor:
         """
-        阶段一简化版：只使用原子类型特征
+        阶段一简化版：原子类型特征 + 位置编码
         注意：protein_df 和 ligand_df 可能是界面过滤后的数据
         """
         all_features = []
+        all_positions = []
         
         # 处理蛋白质原子
         if not protein_df.empty:
             for _, row in protein_df.iterrows():
-                # 只使用原子类型独热编码 (10维)
+                # 原子类型独热编码 (10维)
                 atom_type = self.get_atom_type_onehot(row['element'])
                 all_features.append(atom_type)
+                all_positions.append([row['x'], row['y'], row['z']])
         
         # 处理配体原子
         if not ligand_df.empty:
             for _, row in ligand_df.iterrows():
-                # 只使用原子类型独热编码 (10维)
+                # 原子类型独热编码 (10维)
                 atom_type = self.get_atom_type_onehot(row['element'])
                 all_features.append(atom_type)
+                all_positions.append([row['x'], row['y'], row['z']])
         
         if len(all_features) == 0:
             raise ValueError("没有找到任何原子特征")
         
-        return torch.tensor(np.array(all_features), dtype=torch.float32)
+        # 转换为tensor
+        atom_type_features = torch.tensor(np.array(all_features), dtype=torch.float32)
+        
+        # 添加位置编码
+        if self.use_positional_encoding:
+            positions = torch.tensor(all_positions, dtype=torch.float32)
+            pos_encoding = self.get_positional_encoding(positions, self.pe_dim)
+            # 拼接原子类型特征和位置编码
+            final_features = torch.cat([atom_type_features, pos_encoding], dim=1)
+        else:
+            final_features = atom_type_features
+        
+        return final_features
     
     def get_feature_dimensions(self) -> Dict[str, int]:
         """返回阶段一的特征维度信息"""
         return {
-            'node_dim': self.atom_feature_dim,  # 10维: 原子类型独热编码
+            'node_dim': self.atom_feature_dim,  # 10 + pe_dim维: 原子类型独热编码 + 位置编码
             'edge_dim': self.num_gaussians,     # 16维: 高斯基函数扩展距离
-            'pos_dim': 3
+            'pos_dim': 3,
+            'atom_type_dim': 10,                # 原子类型维度
+            'positional_encoding_dim': self.pe_dim if self.use_positional_encoding else 0
         }
 
 
@@ -317,6 +337,10 @@ def main():
                        help='测试单个样本（提供复合物ID，如1a4k）')
     parser.add_argument('--save_test_output', action='store_true',
                        help='保存测试样本的详细输出信息')
+    parser.add_argument('--use_positional_encoding', action='store_true', default=True,
+                       help='使用位置编码（默认启用）')
+    parser.add_argument('--pe_dim', type=int, default=32,
+                       help='位置编码维度')
     
     args = parser.parse_args()
     
@@ -342,7 +366,9 @@ def main():
         cutoff_radius=args.cutoff_radius,
         num_gaussians=args.num_gaussians,
         use_knn=use_knn,
-        k=args.k
+        k=args.k,
+        use_positional_encoding=args.use_positional_encoding,
+        pe_dim=args.pe_dim
     )
     
     # 加载元数据
@@ -450,6 +476,10 @@ def main():
             'method': 'knn' if use_knn else 'radius',
             'k': args.k if use_knn else None,
             'radius': args.cutoff_radius if not use_knn else None
+        },
+        'positional_encoding': {
+            'enabled': args.use_positional_encoding,
+            'dimension': args.pe_dim if args.use_positional_encoding else 0
         },
         'data_format': 'esa_edge_representations'
     }

@@ -192,8 +192,7 @@ class Stage1Trainer:
             set_max_items=self.max_edges,
             early_stopping_patience=self.config['patience'],
             optimiser_weight_decay=self.config['weight_decay'],
-            regression_loss_fn="mse",
-            posenc=None  # 阶段一不使用位置编码
+            regression_loss_fn="mse"
         )
         
         return model

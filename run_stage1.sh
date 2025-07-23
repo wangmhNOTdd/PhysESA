@@ -44,7 +44,9 @@ if [ -f "./experiments/stage1/train.pkl" ] || [ -f "./experiments/stage1/valid.p
             --cutoff_radius 5.0 \
             --num_gaussians 16 \
             --use_knn \
-            --k 16
+            --k 16 \
+            --use_positional_encoding \
+            --pe_dim 32
     else
         echo "使用现有数据"
     fi
@@ -57,7 +59,9 @@ else
         --cutoff_radius 5.0 \
         --num_gaussians 16 \
         --use_knn \
-        --k 16
+        --k 16 \
+        --use_positional_encoding \
+        --pe_dim 32
 fi
 
 # 检查数据预处理是否成功

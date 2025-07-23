@@ -448,6 +448,40 @@ class MolecularGraphBuilder:
         
         return data
     
+    def get_positional_encoding(self, positions: torch.Tensor, d_model: int = 64) -> torch.Tensor:
+        """
+        为原子坐标生成位置编码
+        
+        Args:
+            positions: 原子坐标 [num_atoms, 3]
+            d_model: 编码维度
+            
+        Returns:
+            位置编码 [num_atoms, d_model]
+        """
+        # 简化版位置编码：使用傅里叶特征
+        # 对每个空间维度使用不同的频率
+        num_atoms = positions.shape[0]
+        pe = torch.zeros(num_atoms, d_model)
+        
+        # 为每个坐标轴生成不同频率的正弦/余弦编码
+        for dim in range(3):  # x, y, z
+            coord = positions[:, dim]  # [num_atoms]
+            
+            # 每个坐标轴使用 d_model//3 个维度
+            dim_size = d_model // 3
+            if dim == 2:  # 确保总维度是d_model
+                dim_size = d_model - 2 * (d_model // 3)
+                
+            for i in range(dim_size // 2):
+                # 使用不同的频率
+                freq = 1.0 / (10000 ** (2 * i / dim_size))
+                
+                pe[:, dim * (d_model // 3) + 2*i] = torch.sin(coord * freq)
+                pe[:, dim * (d_model // 3) + 2*i + 1] = torch.cos(coord * freq)
+        
+        return pe.float()
+    
     def get_feature_dimensions(self) -> Dict[str, int]:
         """返回特征维度信息"""
         return {
