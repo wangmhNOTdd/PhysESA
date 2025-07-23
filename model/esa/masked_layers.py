@@ -702,19 +702,20 @@ class Estimator(nn.Module):
         self.hidden_dim = graph_dim
         self.num_inds = num_inds
 
+        # Handle parameter name mapping and extract specific args
+        dim_output = kwargs.pop('linear_output_size', 1)
+        use_bfloat16 = kwargs.pop('use_fp16', True)
+
         # The core attention model
         self.st_fast = ESA(
             num_outputs=num_inds,
-            dim_output=kwargs.get('linear_output_size', 1),
+            dim_output=dim_output,
             dim_hidden=hidden_dims,
             num_heads=num_heads,
             layer_types=layer_types,
             set_max_items=set_max_items,
-            node_or_edge=kwargs.get('apply_attention_on', 'edge'),
-            xformers_or_torch_attn=kwargs.get('xformers_or_torch_attn', 'xformers'),
-            use_mlps=kwargs.get('use_mlps', True),
-            mlp_type=kwargs.get('mlp_type', 'gated_mlp'),
-            use_bfloat16=kwargs.get('use_fp16', True),
+            use_bfloat16=use_bfloat16,
+            # All other ESA parameters are passed via kwargs
             **kwargs
         )
 
