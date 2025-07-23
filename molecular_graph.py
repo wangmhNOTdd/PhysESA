@@ -9,6 +9,7 @@ import pandas as pd
 import torch
 from Bio import PDB
 from rdkit import Chem
+from rdkit.Chem import AllChem
 from torch_geometric.data import Data
 import json
 import os
@@ -513,7 +514,7 @@ class Stage2GraphBuilder(MolecularGraphBuilder):
         阶段二：提取完整的原子物理化学特征
         """
         # 为配体原子计算Gasteiger电荷
-        Chem.rdPartialCharges.ComputeGasteigerCharges(ligand_mol)
+        AllChem.ComputeGasteigerCharges(ligand_mol)
         
         all_features = []
         
