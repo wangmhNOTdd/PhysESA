@@ -32,7 +32,7 @@ echo "步骤1: 数据预处理"
 echo "生成训练、验证、测试数据集..."
 
 # 检查是否已存在预处理数据
-if [ -f "./experiments/stage1/train.pkl" ] && [ -f "./experiments/stage1/valid.pkl" ] && [ -f "./experiments/stage1/test.pkl" ]; then
+if [ -f "./experiments/stage1/train.pkl" ] || [ -f "./experiments/stage1/valid.pkl" ] || [ -f "./experiments/stage1/test.pkl" ]; then
     echo "发现已存在的预处理数据"
     read -p "是否重新生成数据？(y/N): " regenerate
     if [[ $regenerate =~ ^[Yy]$ ]]; then
