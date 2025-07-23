@@ -13,6 +13,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import TensorBoardLogger
 import numpy as np
+import math
 from typing import List, Dict, Any
 import argparse
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -156,8 +157,13 @@ class Stage1Trainer:
             edge_counts = [sample['num_edges'] for sample in dataset.data]
             all_edge_counts.extend(edge_counts)
         
-        self.max_edges = max(all_edge_counts)
-        print(f"数据集最大边数: {self.max_edges}")
+        # 使用nearest_multiple_of_8确保与ESA模型内部计算一致
+        def nearest_multiple_of_8(n):
+            return math.ceil(n / 8) * 8
+        
+        raw_max_edges = max(all_edge_counts)
+        self.max_edges = nearest_multiple_of_8(raw_max_edges + 1)  # +1 like in ESA model
+        print(f"数据集最大边数: {raw_max_edges} -> 对齐后: {self.max_edges}")
         
     def create_model(self) -> Estimator:
         """创建ESA模型"""
