@@ -676,3 +676,79 @@ class ESA(nn.Module):
             out = enc
 
         return F.mish(self.decoder_linear(out))
+
+class Estimator(nn.Module):
+    """
+    An adapter class that wraps the complex ESA model with a simpler interface,
+    matching the one expected by the original training scripts. It handles the
+    conversion of simple parameters into the detailed configuration needed by ESA
+    and encapsulates the graph processing logic.
+    """
+    def __init__(
+        self,
+        graph_dim,
+        num_features,
+        edge_dim,
+        num_heads,
+        hidden_dims,
+        layer_types,
+        num_inds,
+        set_max_items,
+        **kwargs
+    ):
+        super().__init__()
+        # Store key parameters for access by other modules if needed
+        self.hidden_dim = graph_dim
+        self.num_inds = num_inds
+
+        # The core attention model
+        self.st_fast = ESA(
+            num_outputs=num_inds,
+            dim_output=kwargs.get('linear_output_size', 1),
+            dim_hidden=hidden_dims,
+            num_heads=num_heads,
+            layer_types=layer_types,
+            set_max_items=set_max_items,
+            node_or_edge=kwargs.get('apply_attention_on', 'edge'),
+            xformers_or_torch_attn=kwargs.get('xformers_or_torch_attn', 'xformers'),
+            use_mlps=kwargs.get('use_mlps', True),
+            mlp_type=kwargs.get('mlp_type', 'gated_mlp'),
+            use_bfloat16=kwargs.get('use_fp16', True),
+            **kwargs
+        )
+
+        # MLP to process combined node and edge features before attention
+        self.node_edge_mlp = SmallMLP(
+            in_dim=num_features * 2 + edge_dim,
+            out_dim=graph_dim,
+            inter_dim=graph_dim * 2,
+            num_layers=2,
+            dropout_p=0.1
+        )
+
+    def forward(self, batch: Batch) -> torch.Tensor:
+        """
+        Handles the full graph processing pipeline.
+        """
+        x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
+        num_max_items = batch.max_edge_global.item()
+
+        # 1. Create edge features from node features
+        source = x[edge_index[0, :], :]
+        target = x[edge_index[1, :], :]
+        h = torch.cat((source, target), dim=1)
+
+        if edge_attr is not None:
+            h = torch.cat((h, edge_attr.float()), dim=1)
+
+        # 2. Project edge features to the graph dimension
+        h = self.node_edge_mlp(h)
+
+        # 3. Convert to dense batch for the attention mechanism
+        edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
+        h, _ = torch_geometric.utils.to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
+
+        # 4. Pass through the core ESA model
+        predictions = self.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items)
+        
+        return predictions.squeeze(-1)
