@@ -9,7 +9,7 @@ import torch
 import json
 import numpy as np
 from torch_geometric.data import Data
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from tqdm import tqdm
 import argparse
 
@@ -28,20 +28,26 @@ class Stage1GraphBuilder(MolecularGraphBuilder):
     def get_atom_features(self, protein_df, ligand_df) -> torch.Tensor:
         """
         阶段一简化版：只使用原子类型特征
+        注意：protein_df 和 ligand_df 可能是界面过滤后的数据
         """
         all_features = []
         
         # 处理蛋白质原子
-        for _, row in protein_df.iterrows():
-            # 只使用原子类型独热编码 (10维)
-            atom_type = self.get_atom_type_onehot(row['element'])
-            all_features.append(atom_type)
+        if not protein_df.empty:
+            for _, row in protein_df.iterrows():
+                # 只使用原子类型独热编码 (10维)
+                atom_type = self.get_atom_type_onehot(row['element'])
+                all_features.append(atom_type)
         
         # 处理配体原子
-        for _, row in ligand_df.iterrows():
-            # 只使用原子类型独热编码 (10维)
-            atom_type = self.get_atom_type_onehot(row['element'])
-            all_features.append(atom_type)
+        if not ligand_df.empty:
+            for _, row in ligand_df.iterrows():
+                # 只使用原子类型独热编码 (10维)
+                atom_type = self.get_atom_type_onehot(row['element'])
+                all_features.append(atom_type)
+        
+        if len(all_features) == 0:
+            raise ValueError("没有找到任何原子特征")
         
         return torch.tensor(np.array(all_features), dtype=torch.float32)
     
@@ -57,7 +63,7 @@ class Stage1GraphBuilder(MolecularGraphBuilder):
 def prepare_split_data(
     data_root: str,
     split_type: str = "scaffold_split",
-    max_samples_per_split: int = None
+    max_samples_per_split: Optional[int] = None
 ) -> Tuple[List[str], List[str], List[str]]:
     """
     准备数据分割
@@ -204,6 +210,86 @@ def prepare_for_esa_training(graph_data: Data) -> Dict:
     }
 
 
+def test_single_sample(
+    complex_id: str,
+    data_root: str,
+    graph_builder: Stage1GraphBuilder,
+    metadata: Dict,
+    save_output: bool = False,
+    output_dir: str = './experiments/stage1'
+) -> None:
+    """
+    测试单个样本的处理过程
+    """
+    print(f"\n=== 测试样本: {complex_id} ===")
+    
+    # 构建文件路径
+    pdb_file = os.path.join(data_root, 'pdb_files', complex_id, f'{complex_id}.pdb')
+    sdf_file = os.path.join(data_root, 'pdb_files', complex_id, f'{complex_id}_ligand.sdf')
+    
+    # 检查文件
+    print(f"PDB文件: {pdb_file}")
+    print(f"存在: {os.path.exists(pdb_file)}")
+    print(f"SDF文件: {sdf_file}")
+    print(f"存在: {os.path.exists(sdf_file)}")
+    
+    if not (os.path.exists(pdb_file) and os.path.exists(sdf_file)):
+        print("❌ 文件缺失，无法处理")
+        return
+    
+    # 获取亲和力
+    if 'affinities' in metadata and complex_id in metadata['affinities']:
+        affinity = float(metadata['affinities'][complex_id])
+        print(f"亲和力: {affinity}")
+    else:
+        print("❌ 缺少亲和力数据")
+        return
+    
+    try:
+        # 构建图
+        print("\n--- 构建分子图 ---")
+        graph_data = graph_builder.build_graph(complex_id, pdb_file, sdf_file)
+        
+        print(f"✅ 图构建成功!")
+        print(f"节点数: {graph_data.x.shape[0]}")
+        print(f"边数: {graph_data.edge_index.shape[1]}")
+        print(f"节点特征维度: {graph_data.x.shape[1]}")
+        print(f"边特征维度: {graph_data.edge_attr.shape[1] if graph_data.edge_attr is not None else 0}")
+        print(f"蛋白质原子数: {graph_data.num_protein_atoms}")
+        print(f"配体原子数: {graph_data.num_ligand_atoms}")
+        
+        # 转换为ESA格式
+        print("\n--- 转换为ESA格式 ---")
+        esa_sample = prepare_for_esa_training(graph_data)
+        esa_sample['affinity'] = affinity
+        
+        print(f"边表示维度: {esa_sample['edge_representations'].shape}")
+        print(f"边表示范围: [{esa_sample['edge_representations'].min():.3f}, {esa_sample['edge_representations'].max():.3f}]")
+        
+        # 保存测试输出
+        if save_output:
+            os.makedirs(output_dir, exist_ok=True)
+            test_output = {
+                'complex_id': complex_id,
+                'graph_data': graph_data,
+                'esa_sample': esa_sample,
+                'files': {'pdb': pdb_file, 'sdf': sdf_file},
+                'affinity': affinity
+            }
+            
+            output_file = os.path.join(output_dir, f'test_sample_{complex_id}.pkl')
+            with open(output_file, 'wb') as f:
+                pickle.dump(test_output, f)
+            print(f"测试输出已保存到: {output_file}")
+        
+        print("✅ 样本处理成功!")
+        
+    except Exception as e:
+        print(f"❌ 处理失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main():
     parser = argparse.ArgumentParser(description='阶段一数据预处理')
     parser.add_argument('--data_root', type=str, default='./datasets/pdbbind', 
@@ -227,6 +313,10 @@ def main():
                        help='每个分割的最大样本数（用于调试）')
     parser.add_argument('--test_run', action='store_true',
                        help='测试运行模式，只处理少量样本')
+    parser.add_argument('--test_sample', type=str, default=None,
+                       help='测试单个样本（提供复合物ID，如1a4k）')
+    parser.add_argument('--save_test_output', action='store_true',
+                       help='保存测试样本的详细输出信息')
     
     args = parser.parse_args()
     
@@ -258,6 +348,18 @@ def main():
     # 加载元数据
     metadata_path = os.path.join(args.data_root, 'metadata')
     metadata = load_pdbbind_metadata(metadata_path)
+    
+    # 如果是单样本测试模式
+    if args.test_sample:
+        test_single_sample(
+            args.test_sample,
+            args.data_root,
+            graph_builder,
+            metadata,
+            args.save_test_output,
+            args.output_dir
+        )
+        return
     
     # 准备数据分割
     train_ids, val_ids, test_ids = prepare_split_data(
