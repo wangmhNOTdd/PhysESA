@@ -71,30 +71,46 @@ class GraphBuilder:
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
         """
         解析SDF文件，提取配体重原子信息，并返回RDKit Mol对象。
+        增加了对常见SDF格式错误的鲁棒性处理。
         """
-        mol = None
-        try:
-            mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
-        except Exception:
-            try:
-                mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
-                if mol is not None:
-                    Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_PROPERTIES)
-            except Exception as e:
-                print(f"[错误] 无法解析配体文件: {sdf_file}, 错误: {e}")
-                return None, None
+        # RDKit的错误处理：MolFromMolFile在失败时返回None并打印到stderr，而不是抛出异常。
+        # 因此，我们不需要try-except块，而是检查返回值。
+        
+        # 1. 尝试标准、严格的解析
+        mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
+        
+        # 2. 如果失败，尝试无消毒的解析，然后手动进行安全的消毒
+        if mol is None:
+            # print(f"[信息] 标准解析失败: {os.path.basename(sdf_file)}。尝试容错模式...")
+            mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
+            if mol is not None:
+                try:
+                    # 手动执行一系列“安全”的消毒操作。
+                    # SANITIZE_PROPERTIES 是导致价键错误的主要原因，我们将其排除。
+                    safe_sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES
+                    Chem.SanitizeMol(mol, safe_sanitize_ops)
+                except Exception as e:
+                    # 如果手动消毒也失败，则放弃该分子。
+                    print(f"[错误] 手动消毒失败: {os.path.basename(sdf_file)}, 错误: {e}")
+                    return None, None
 
+        # 3. 如果所有方法都失败，则返回None
         if mol is None:
             return None, None
 
+        # 4. 为成功解析的分子添加氢原子
         try:
             mol = Chem.AddHs(mol, addCoords=True)
         except Exception as e:
-            print(f"[警告] 添加氢原子失败: {e}")
+            # 有时添加氢原子也会失败
+            print(f"[警告] 添加氢原子失败: {os.path.basename(sdf_file)}, {e}")
 
+        # 5. 检查3D坐标
         if mol.GetNumConformers() == 0:
+            print(f"[警告] 分子没有3D坐标信息: {os.path.basename(sdf_file)}")
             return None, None
             
+        # 6. 提取原子数据
         conf = mol.GetConformer()
         atoms_data = []
         for atom in mol.GetAtoms():
