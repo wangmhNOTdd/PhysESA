@@ -11,7 +11,7 @@ from torchmetrics import R2Score, MeanSquaredError, MeanAbsoluteError
 
 # Correctly import the Estimator which will act as our main model interface
 from model.esa.masked_layers import Estimator
-from molecular_graph import Stage2GraphBuilder
+from molecular_graph import GraphBuilder
 
 class PhysESA(pl.LightningModule):
     """
@@ -23,7 +23,7 @@ class PhysESA(pl.LightningModule):
         Args:
             esa_config (dict): Configuration for the core ESA model (Estimator).
             training_config (dict): Configuration for training, like learning rate.
-            graph_builder_config (dict): Configuration for the Stage2GraphBuilder.
+            graph_builder_config (dict): Configuration for the GraphBuilder.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -31,7 +31,7 @@ class PhysESA(pl.LightningModule):
         self.training_config = training_config
         
         # Instantiate the graph builder, which is not used in forward but might be needed for other hooks
-        self.graph_builder = Stage2GraphBuilder(**graph_builder_config)
+        self.graph_builder = GraphBuilder(**graph_builder_config)
         
         # Get feature dimensions from the graph builder to configure the ESA model
         feature_dims = self.graph_builder.get_feature_dimensions()
@@ -108,8 +108,7 @@ class PhysESA(pl.LightningModule):
             optimizer,
             mode='min',
             factor=0.5,
-            patience=5,
-            verbose=True
+            patience=5
         )
         return {
             "optimizer": optimizer,

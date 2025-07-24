@@ -18,12 +18,12 @@ import traceback
 # 添加项目根目录到sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from molecular_graph import Stage2GraphBuilder, load_pdbbind_metadata, prepare_split_data
+from molecular_graph import GraphBuilder, load_pdbbind_metadata, prepare_split_data
 
 def process_complex_list(
     complex_ids: List[str],
     data_root: str,
-    graph_builder: Stage2GraphBuilder,
+    graph_builder: GraphBuilder,
     metadata: Dict,
     split_name: str
 ) -> List[Data]:
@@ -49,8 +49,9 @@ def process_complex_list(
             
         try:
             graph_data = graph_builder.build_graph(complex_id, pdb_file, sdf_file)
-            graph_data.y = torch.tensor([affinity], dtype=torch.float32)
-            processed_data.append(graph_data)
+            if graph_data is not None:
+                graph_data.y = torch.tensor([affinity], dtype=torch.float32)
+                processed_data.append(graph_data)
         except Exception as e:
             print(f"错误: 跳过 {complex_id}: 图构建失败 - {e}")
             traceback.print_exc() # 打印详细的堆栈跟踪
@@ -95,7 +96,7 @@ def main():
     
     os.makedirs(args.output_dir, exist_ok=True)
     
-    graph_builder = Stage2GraphBuilder(
+    graph_builder = GraphBuilder(
         cutoff_radius=args.cutoff_radius,
         num_gaussians=args.num_gaussians,
         use_knn=use_knn,
