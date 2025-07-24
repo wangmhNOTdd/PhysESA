@@ -71,18 +71,19 @@ class GraphBuilder:
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
         """
         解析SDF文件，提取配体重原子信息，并返回RDKit Mol对象。
+        增加了对常见SDF格式错误的鲁棒性处理。
         """
-        mol = None
-        try:
-            mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
-        except Exception:
-            try:
-                mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
-                if mol is not None:
-                    Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_PROPERTIES)
-            except Exception as e:
-                print(f"[错误] 无法解析配体文件: {sdf_file}, 错误: {e}")
-                return None, None
+        mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
+        
+        if mol is None:
+            mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
+            if mol is not None:
+                try:
+                    safe_sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES
+                    Chem.SanitizeMol(mol, safe_sanitize_ops)
+                except Exception as e:
+                    print(f"[错误] 手动消毒失败: {os.path.basename(sdf_file)}, 错误: {e}")
+                    return None, None
 
         if mol is None:
             return None, None
@@ -90,7 +91,7 @@ class GraphBuilder:
         try:
             mol = Chem.AddHs(mol, addCoords=True)
         except Exception as e:
-            print(f"[警告] 添加氢原子失败: {e}")
+            print(f"[警告] 添加氢原子失败: {os.path.basename(sdf_file)}, {e}")
 
         if mol.GetNumConformers() == 0:
             return None, None
