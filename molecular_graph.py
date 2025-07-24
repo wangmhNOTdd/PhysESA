@@ -71,36 +71,28 @@ class GraphBuilder:
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
         """
         解析SDF文件，提取配体重原子信息，并返回RDKit Mol对象。
-        增加了对常见SDF格式错误的鲁棒性处理和调试信息。
         """
-        fname = os.path.basename(sdf_file)
-        # print(f"DEBUG: Parsing {fname}")
+        mol = None
+        try:
+            mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
+        except Exception:
+            try:
+                mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
+                if mol is not None:
+                    Chem.SanitizeMol(mol, Chem.SANITIZE_ALL ^ Chem.SANITIZE_PROPERTIES)
+            except Exception as e:
+                print(f"[错误] 无法解析配体文件: {sdf_file}, 错误: {e}")
+                return None, None
 
-        mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
-        
         if mol is None:
-            # print(f"DEBUG: sanitize=True failed for {fname}. Trying sanitize=False.")
-            mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
-            if mol is not None:
-                try:
-                    safe_sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES
-                    Chem.SanitizeMol(mol, safe_sanitize_ops)
-                    # print(f"DEBUG: Manual sanitization succeeded for {fname}.")
-                except Exception as e:
-                    print(f"DEBUG: Manual sanitization FAILED for {fname}: {e}")
-                    return None, None
-        
-        if mol is None:
-            # print(f"DEBUG: All parsing attempts FAILED for {fname}.")
             return None, None
 
         try:
             mol = Chem.AddHs(mol, addCoords=True)
         except Exception as e:
-            print(f"DEBUG: AddHs FAILED for {fname}: {e}")
+            print(f"[警告] 添加氢原子失败: {e}")
 
         if mol.GetNumConformers() == 0:
-            # print(f"DEBUG: No 3D conformers found for {fname}.")
             return None, None
             
         conf = mol.GetConformer()
@@ -115,7 +107,6 @@ class GraphBuilder:
                     'is_ligand': True
                 })
         
-        # print(f"DEBUG: Successfully parsed {fname}, {len(atoms_data)} heavy atoms.")
         return pd.DataFrame(atoms_data), mol
 
     def get_atom_type_onehot(self, symbol: str) -> np.ndarray:
@@ -140,7 +131,7 @@ class GraphBuilder:
         
         all_features = []
         for _, row in all_atoms_df.iterrows():
-            if row.get('is_ligand', False):
+            if row.get('is_ligand') is True:
                 atom = ligand_mol.GetAtomWithIdx(int(row['atom_idx']))
                 atom_type_oh = self.get_atom_type_onehot(atom.GetSymbol())
                 formal_charge = float(atom.GetFormalCharge())
@@ -236,33 +227,26 @@ class GraphBuilder:
 
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
         """构建包含完整物理信息的界面分子图。"""
-        # print(f"\nDEBUG: Building graph for {complex_id}")
         protein_df = self.parse_pdb_file(pdb_file)
         ligand_df, ligand_mol = self.parse_sdf_ligand(sdf_file)
 
         if protein_df.empty or ligand_df is None or ligand_df.empty or ligand_mol is None:
-            # print(f"DEBUG: build_graph failed for {complex_id} at parsing stage.")
-            # if protein_df.empty: print("  - Reason: Protein parsing failed.")
-            # if ligand_df is None or ligand_df.empty: print("  - Reason: Ligand parsing failed (DF).")
-            # if ligand_mol is None: print("  - Reason: Ligand parsing failed (Mol).")
+            print(f"[警告] 跳过 {complex_id}: 无法解析PDB/SDF文件。")
             return None
         
-        # print(f"DEBUG: {complex_id} - Parsed {len(protein_df)} protein atoms and {len(ligand_df)} ligand atoms.")
         interface_atoms_df, interface_pos = self.filter_interface_atoms(protein_df, ligand_df)
         
-        if interface_pos.shape[0] <= len(ligand_df):
-            # print(f"DEBUG: build_graph failed for {complex_id} at interface stage. No protein atoms in interface.")
+        if interface_pos.shape[0] == 0:
+            print(f"[警告] 跳过 {complex_id}: 界面未发现原子。")
             return None
 
-        # print(f"DEBUG: {complex_id} - Found {interface_pos.shape[0]} interface atoms.")
         atom_features = self.get_atom_features(interface_atoms_df, ligand_mol)
         edge_index = self.build_edges(interface_pos)
         
         if edge_index.shape[1] == 0:
-            # print(f"DEBUG: build_graph failed for {complex_id} at edge building stage. No edges found.")
+            print(f"[警告] 跳过 {complex_id}: 界面未发现相互作用边。")
             return None
             
-        # print(f"DEBUG: {complex_id} - Built {edge_index.shape[1]} edges.")
         edge_features = self.get_full_edge_features(edge_index, interface_pos, interface_atoms_df)
         
         return Data(
