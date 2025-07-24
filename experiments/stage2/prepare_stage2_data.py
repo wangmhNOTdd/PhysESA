@@ -65,7 +65,7 @@ def main():
                        help='PDBbind数据集根目录')
     parser.add_argument('--output_dir', type=str, default='./experiments/stage2',
                        help='输出目录')
-    parser.add_argument('--split_type', type=str, default='scaffold_split',
+    parser.add_argument('--split_type', type=str, default='identity60_split',
                        choices=['scaffold_split', 'identity30_split', 'identity60_split'],
                        help='数据分割类型')
     parser.add_argument('--interface_cutoff', type=float, default=8.0,
