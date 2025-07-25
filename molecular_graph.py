@@ -121,7 +121,14 @@ class GraphBuilder:
         atoms_data = []
         # 使用BRICS分解配体为motifs
         brics_bonds = list(BRICS.FindBRICSBonds(mol))
-        brics_bond_indices = [b[0] for b in brics_bonds]
+        # 修复：FragmentOnBonds需要的是bond indices (integers), 而不是atom pairs (tuples).
+        brics_bond_indices = []
+        if brics_bonds:
+            atom_pairs = [b[0] for b in brics_bonds]
+            for atom_pair in atom_pairs:
+                bond = mol.GetBondBetweenAtoms(atom_pair[0], atom_pair[1])
+                if bond:
+                    brics_bond_indices.append(bond.GetIdx())
         
         fragmented_mol = Chem.FragmentOnBonds(mol, brics_bond_indices, addDummies=False)
         motif_map = rdmolops.GetMolFrags(fragmented_mol)
