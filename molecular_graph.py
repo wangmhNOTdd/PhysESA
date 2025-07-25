@@ -46,27 +46,35 @@ class GraphBuilder:
         # 距离GBF(num_gaussians) + 方向向量(3) + 电荷乘积(1)
         self.edge_feature_dim = self.num_gaussians + 3 + 1
 
-    def parse_pdb_file(self, pdb_file: str) -> pd.DataFrame:
-        """解析PDB文件，提取重原子信息。"""
-        parser = PDB.PDBParser(QUIET=True)
-        structure = parser.get_structure('complex', pdb_file)
+    def parse_pdb_file(self, pdb_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
+        """
+        使用RDKit解析PDB文件，添加氢原子，并提取重原子信息。
+        """
+        mol = Chem.MolFromPDBFile(pdb_file, removeHs=False, sanitize=True)
+        if mol is None:
+            return None, None
         
+        try:
+            mol = Chem.AddHs(mol, addCoords=True)
+        except Exception as e:
+            print(f"[警告] 为蛋白质添加氢原子失败: {os.path.basename(pdb_file)}, {e}")
+
+        if mol.GetNumConformers() == 0:
+            return None, None
+            
+        conf = mol.GetConformer()
         atoms_data = []
-        for model in structure:
-            for chain in model:
-                for residue in chain:
-                    for atom in residue:
-                        element = atom.element.strip() if atom.element else 'C'
-                        if element != 'H': # 只保留重原子
-                            coord = atom.get_coord()
-                            atoms_data.append({
-                                'element': element,
-                                'x': coord[0], 'y': coord[1], 'z': coord[2],
-                                'atom_name': atom.get_name(),
-                                'residue_name': residue.get_resname(),
-                                'chain_id': chain.id
-                            })
-        return pd.DataFrame(atoms_data)
+        for atom in mol.GetAtoms():
+            if atom.GetSymbol() != 'H':
+                pos = conf.GetAtomPosition(atom.GetIdx())
+                atoms_data.append({
+                    'atom_idx': atom.GetIdx(),
+                    'element': atom.GetSymbol(),
+                    'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
+                    'is_ligand': False # 明确标记为非配体
+                })
+        
+        return pd.DataFrame(atoms_data), mol
 
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
         """
@@ -126,36 +134,60 @@ class GraphBuilder:
         estimates = {'C': 2.0, 'N': 1.5, 'O': 1.0, 'S': 2.0, 'P': 3.0}
         return estimates.get(element, 1.0)
 
-    def get_atom_features(self, all_atoms_df: pd.DataFrame, ligand_mol: Chem.Mol) -> torch.Tensor:
-        """提取完整的原子物理化学特征。"""
+    def get_atom_features(self, all_atoms_df: pd.DataFrame, protein_mol: Chem.Mol, ligand_mol: Chem.Mol) -> torch.Tensor:
+        """
+        提取完整的、对称的原子物理化学特征。
+        现在对蛋白质和配体使用完全相同的RDKit特征提取流程。
+        """
+        # 为蛋白质和配体计算Gasteiger电荷
+        AllChem.ComputeGasteigerCharges(protein_mol)
         AllChem.ComputeGasteigerCharges(ligand_mol)
         
         all_features = []
         for _, row in all_atoms_df.iterrows():
-            if row.get('is_ligand') is True:
-                atom = ligand_mol.GetAtomWithIdx(int(row['atom_idx']))
-                atom_type_oh = self.get_atom_type_onehot(atom.GetSymbol())
-                formal_charge = float(atom.GetFormalCharge())
-                hybridization = str(atom.GetHybridization())
-                hybrid_oh = np.zeros(len(self.hybridization_types))
-                if hybridization in self.hybridization_types:
-                    hybrid_oh[self.hybridization_types.index(hybridization)] = 1.0
-                else:
-                    hybrid_oh[-1] = 1.0 # UNSPECIFIED
-                is_aromatic = float(atom.GetIsAromatic())
-                heavy_neighbors = float(sum(1 for n in atom.GetNeighbors() if n.GetSymbol() != 'H'))
-                total_hydrogens = float(atom.GetTotalNumHs())
-                gasteiger_charge = float(atom.GetProp('_GasteigerCharge'))
-                all_atoms_df.at[row.name, 'gasteiger_charge'] = gasteiger_charge
-            else: # 蛋白质原子
-                atom_type_oh = self.get_atom_type_onehot(row['element'])
-                formal_charge = 0.0
-                hybrid_oh = np.zeros(len(self.hybridization_types)); hybrid_oh[-1] = 1.0
-                is_aromatic = 0.0
-                heavy_neighbors = self._estimate_heavy_neighbors(row['element'])
-                total_hydrogens = 0.0
-                all_atoms_df.at[row.name, 'gasteiger_charge'] = 0.0
+            is_ligand = row.get('is_ligand', False)
+            
+            # 根据is_ligand标志选择正确的Mol对象
+            mol = ligand_mol if is_ligand else protein_mol
+            
+            # 检查atom_idx是否存在且有效
+            if pd.isna(row['atom_idx']):
+                # 如果一个原子没有索引，我们无法在Mol对象中找到它，只能跳过
+                # 这通常不应该发生，除非数据处理流程有误
+                print(f"[警告] 原子缺少有效索引，跳过特征提取。")
+                continue
 
+            atom = mol.GetAtomWithIdx(int(row['atom_idx']))
+            
+            # --- 统一的特征提取流程 ---
+            # 1. 原子类型 (10维)
+            atom_type_oh = self.get_atom_type_onehot(atom.GetSymbol())
+            
+            # 2. 形式电荷 (1维)
+            formal_charge = float(atom.GetFormalCharge())
+            
+            # 3. 杂化类型 (6维)
+            hybridization = str(atom.GetHybridization())
+            hybrid_oh = np.zeros(len(self.hybridization_types))
+            if hybridization in self.hybridization_types:
+                hybrid_oh[self.hybridization_types.index(hybridization)] = 1.0
+            else:
+                hybrid_oh[-1] = 1.0 # UNSPECIFIED
+            
+            # 4. 芳香性 (1维)
+            is_aromatic = float(atom.GetIsAromatic())
+            
+            # 5. 重原子邻居数 (1维)
+            heavy_neighbors = float(sum(1 for n in atom.GetNeighbors() if n.GetSymbol() != 'H'))
+            
+            # 6. 总氢原子数 (1维)
+            total_hydrogens = float(atom.GetTotalNumHs())
+            
+            # Gasteiger电荷（用于边特征计算）
+            gasteiger_charge = float(atom.GetProp('_GasteigerCharge'))
+            all_atoms_df.at[row.name, 'gasteiger_charge'] = gasteiger_charge
+
+            # --- 拼接所有特征 ---
             features = np.concatenate([
                 atom_type_oh, [formal_charge], hybrid_oh,
                 [is_aromatic], [heavy_neighbors], [total_hydrogens]
@@ -228,20 +260,20 @@ class GraphBuilder:
 
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
         """构建包含完整物理信息的界面分子图。"""
-        protein_df = self.parse_pdb_file(pdb_file)
+        protein_df, protein_mol = self.parse_pdb_file(pdb_file)
         ligand_df, ligand_mol = self.parse_sdf_ligand(sdf_file)
 
-        if protein_df.empty or ligand_df is None or ligand_df.empty or ligand_mol is None:
+        if protein_df is None or protein_mol is None or ligand_df is None or ligand_mol is None:
             print(f"[警告] 跳过 {complex_id}: 无法解析PDB/SDF文件。")
             return None
         
         interface_atoms_df, interface_pos = self.filter_interface_atoms(protein_df, ligand_df)
         
-        if interface_pos.shape[0] == 0:
-            print(f"[警告] 跳过 {complex_id}: 界面未发现原子。")
+        if interface_pos.shape[0] <= len(ligand_df):
+            # print(f"DEBUG: build_graph failed for {complex_id} at interface stage. No protein atoms in interface.")
             return None
 
-        atom_features = self.get_atom_features(interface_atoms_df, ligand_mol)
+        atom_features = self.get_atom_features(interface_atoms_df, protein_mol, ligand_mol)
         edge_index = self.build_edges(interface_pos)
         
         if edge_index.shape[1] == 0:
