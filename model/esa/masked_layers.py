@@ -779,9 +779,20 @@ class Estimator(nn.Module):
         edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
         h_dense, h_mask = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
-        output = self.st_fast(h_dense, edge_index, batch_mapping, num_max_items=num_max_items, return_edge_features_before_pma=return_edge_features_before_pma)
+        # Pad h_dense and h_mask to the global max size expected by the ESA module
+        global_max_items = self.st_fast.set_max_items
+        if num_max_items < global_max_items:
+            pad_amount = global_max_items - num_max_items
+            # Pad the sequence length dimension (dim 1) of the feature tensor
+            h_dense = F.pad(h_dense, (0, 0, 0, pad_amount), "constant", 0)
+            # Pad the mask accordingly
+            h_mask = F.pad(h_mask, (0, pad_amount), "constant", False)
+
+        # The num_max_items passed down should be the global one, consistent with the padded tensor
+        output = self.st_fast(h_dense, edge_index, batch_mapping, num_max_items=global_max_items, return_edge_features_before_pma=return_edge_features_before_pma)
         
         if return_edge_features_before_pma:
-            return output[h_mask] # Un-batch the dense features
+            # The returned 'output' is also padded, so we use the padded mask to un-batch it
+            return output[h_mask]
 
         return output.squeeze(-1)
