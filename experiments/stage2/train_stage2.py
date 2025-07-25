@@ -53,7 +53,7 @@ class Collater:
 def main():
     parser = argparse.ArgumentParser(description='阶段二PhysESA模型训练')
     parser.add_argument('--data_dir', type=str, default='./experiments/stage2', help='数据目录')
-    parser.add_argument('--output_dir', type=str, default='./experiments/stage2/checkpoints', help='输出目录')
+    parser.add_argument('--output_dir', type=str, default='./experiments/stage2', help='输出和检查点目录')
     parser.add_argument('--config', type=str, default=None, help='配置文件路径（可选）')
     parser.add_argument('--checkpoint', type=str, default=None, help='模型检查点路径，用于测试模式')
     # ... (可以添加更多命令行参数来覆盖配置)
@@ -186,7 +186,122 @@ def main():
     else:
         print("开始训练PhysESA模型...")
         trainer.fit(model, train_loader, val_loader)
-        print(f"训练完成！模型保存在: {args.output_dir}")
+        print(f"训练完成！模型和日志保存在: {args.output_dir}")
+        
+        # 在训练结束后，使用最佳模型进行测试
+        best_model_path = checkpoint_callback.best_model_path
+        if best_model_path and os.path.exists(best_model_path):
+            print(f"\n使用最佳模型进行测试: {best_model_path}")
+            trainer.test(model, dataloaders=test_loader, ckpt_path=best_model_path)
+        else:
+            print(f"\n警告: 未找到最佳模型检查点 '{best_model_path}'，跳过最终测试。")
+
+    return args
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def plot_training_results(log_dir: str):
+    """
+    从TensorBoard日志中读取metrics.csv并绘制训练曲线。
+    """
+    metrics_path = os.path.join(log_dir, 'metrics.csv')
+    if not os.path.exists(metrics_path):
+        print(f"警告: 在 {log_dir} 中未找到 metrics.csv，跳过绘图。")
+        return
+
+    print(f"从 {metrics_path} 加载指标并开始绘图...")
+    metrics_df = pd.read_csv(metrics_path)
+
+    # 数据预处理：处理每个epoch可能有多行（train_loss_step）的情况
+    # 我们只关心每个epoch结束时的指标
+    epoch_metrics = metrics_df.groupby('epoch').last().reset_index()
+
+    # 获取所有记录的指标
+    val_metrics = sorted([col for col in epoch_metrics.columns if col.startswith('val/')])
+    
+    # 设置绘图风格
+    sns.set_style("whitegrid")
+    
+    # 计算需要的行数
+    num_plots = 1 + len(val_metrics)
+    num_rows = (num_plots + 1) // 2
+    fig, axes = plt.subplots(num_rows, 2, figsize=(20, 6 * num_rows), squeeze=False)
+    axes = axes.flatten()
+
+    # 1. 绘制训练和验证损失
+    ax = axes[0]
+    if 'train_loss_epoch' in epoch_metrics.columns:
+        sns.lineplot(data=epoch_metrics, x='epoch', y='train_loss_epoch', ax=ax, label='Train Loss (epoch)', color='royalblue', marker='o', markersize=4)
+    if 'val_loss' in epoch_metrics.columns:
+        sns.lineplot(data=epoch_metrics, x='epoch', y='val_loss', ax=ax, label='Validation Loss', color='darkorange', marker='o', markersize=4)
+    ax.set_title('Training & Validation Loss vs. Epoch', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Epoch', fontsize=12)
+    ax.set_ylabel('Loss', fontsize=12)
+    ax.legend()
+    
+    # 找到并标注最佳epoch
+    # 找到并标注最佳epoch
+    if 'val_loss' in epoch_metrics.columns and not epoch_metrics['val_loss'].isnull().all():
+        best_epoch_idx = epoch_metrics['val_loss'].idxmin()
+        # 最终修复：通过.values[0]获取底层的numpy值，然后转换为原生Python类型
+        best_epoch = int(epoch_metrics.loc[best_epoch_idx:best_epoch_idx, 'epoch'].values[0])
+        best_val_loss = float(epoch_metrics.loc[best_epoch_idx:best_epoch_idx, 'val_loss'].values[0])
+        
+        # 标注损失图
+        ax.axvline(x=best_epoch, color='red', linestyle='--', linewidth=1.5, label=f'Best Epoch: {best_epoch}')
+        ax.scatter(x=best_epoch, y=best_val_loss, marker='*', s=200, color='red', zorder=5, label=f'Best val_loss: {best_val_loss:.4f}')
+        ax.legend()
+
+        # 2. 绘制其他验证集指标
+        plot_idx = 1
+        for metric in val_metrics:
+            if metric == 'val_loss': continue
+            ax = axes[plot_idx]
+            sns.lineplot(data=epoch_metrics, x='epoch', y=metric, ax=ax, label=metric, marker='o', markersize=4)
+            ax.set_title(f'Validation {metric.split("/")[-1].capitalize()} vs. Epoch', fontsize=14, fontweight='bold')
+            ax.set_xlabel('Epoch', fontsize=12)
+            ax.set_ylabel('Score', fontsize=12)
+            
+            # 在其他指标图上也标注最佳epoch的位置
+            best_metric_val = float(epoch_metrics.loc[best_epoch_idx:best_epoch_idx, metric].values[0])
+            ax.axvline(x=best_epoch, color='red', linestyle='--', linewidth=1.5)
+            ax.scatter(x=best_epoch, y=best_metric_val, marker='*', s=200, color='red', zorder=5, label=f'Value at Best Epoch: {best_metric_val:.4f}')
+            ax.legend()
+            plot_idx += 1
+    else:
+        # 如果没有val_loss，正常绘制其他图但不加标注
+        plot_idx = 1
+        for metric in val_metrics:
+            if metric == 'val_loss': continue
+            ax = axes[plot_idx]
+            sns.lineplot(data=epoch_metrics, x='epoch', y=metric, ax=ax, label=metric, marker='o', markersize=4)
+            ax.set_title(f'Validation {metric.split("/")[-1].capitalize()} vs. Epoch', fontsize=14, fontweight='bold')
+            ax.set_xlabel('Epoch', fontsize=12)
+            ax.set_ylabel('Score', fontsize=12)
+            ax.legend()
+            plot_idx += 1
+
+    # 隐藏多余的子图
+    for i in range(plot_idx, len(axes)):
+        fig.delaxes(axes[i])
+
+    fig.suptitle('Training and Validation Metrics', fontsize=20, fontweight='bold', y=1.02)
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    save_path = os.path.join(os.path.dirname(log_dir), 'training_curves.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"训练曲线图已保存至: {save_path}")
+    plt.close()
+
 
 if __name__ == "__main__":
-    main()
+    args = main()
+    if args:
+        # 训练/测试结束后，找到最新的日志目录并绘图
+        log_dir = os.path.join(args.output_dir, 'physesa_logs')
+        if os.path.exists(log_dir):
+            versions = sorted([d for d in os.listdir(log_dir) if d.startswith('version_')])
+            if versions:
+                latest_version_dir = os.path.join(log_dir, versions[-1])
+                plot_training_results(latest_version_dir)

@@ -7,7 +7,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 from torch_geometric.data import Batch
 from torch.nn import functional as F
-from torchmetrics import R2Score, MeanSquaredError, MeanAbsoluteError
+from torchmetrics import R2Score, MeanSquaredError, MeanAbsoluteError, PearsonCorrCoef, SpearmanCorrCoef
 
 # Correctly import the Estimator which will act as our main model interface
 from model.esa.masked_layers import Estimator
@@ -42,10 +42,18 @@ class PhysESA(pl.LightningModule):
         # PhysESA's role is to simply host it within the Lightning framework.
         self.esa_model = Estimator(**esa_config)
 
+        # Metrics for validation
+        self.val_pearson = PearsonCorrCoef()
+        self.val_spearman = SpearmanCorrCoef()
+        self.val_rmse = MeanSquaredError(squared=False)
+        self.val_mae = MeanAbsoluteError()
+
         # Metrics for testing
-        self.r2 = R2Score()
-        self.rmse = MeanSquaredError(squared=False)
-        self.mae = MeanAbsoluteError()
+        self.test_r2 = R2Score()
+        self.test_rmse = MeanSquaredError(squared=False)
+        self.test_mae = MeanAbsoluteError()
+        self.test_pearson = PearsonCorrCoef()
+        self.test_spearman = SpearmanCorrCoef()
 
     def forward(self, batch: Batch) -> torch.Tensor:
         """
@@ -73,16 +81,42 @@ class PhysESA(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         loss, y_pred, y_true = self._common_step(batch, batch_idx)
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, batch_size=batch.num_graphs)
+        
+        # Update validation metrics
+        self.val_pearson.update(y_pred, y_true.squeeze())
+        self.val_spearman.update(y_pred, y_true.squeeze())
+        self.val_rmse.update(y_pred, y_true.squeeze())
+        self.val_mae.update(y_pred, y_true.squeeze())
+        
         return loss
+
+    def on_validation_epoch_end(self):
+        """
+        Compute and log final validation metrics at the end of the validation epoch.
+        """
+        self.log_dict({
+            'val/pearson': self.val_pearson.compute(),
+            'val/spearman': self.val_spearman.compute(),
+            'val/rmse': self.val_rmse.compute(),
+            'val/mae': self.val_mae.compute()
+        }, on_epoch=True, logger=True)
+        
+        # Reset metrics
+        self.val_pearson.reset()
+        self.val_spearman.reset()
+        self.val_rmse.reset()
+        self.val_mae.reset()
 
     def test_step(self, batch, batch_idx):
         loss, y_pred, y_true = self._common_step(batch, batch_idx)
         self.log('test_loss', loss, on_step=False, on_epoch=True, logger=True, batch_size=batch.num_graphs)
         
         # Update metrics
-        self.r2(y_pred, y_true.squeeze())
-        self.rmse(y_pred, y_true.squeeze())
-        self.mae(y_pred, y_true.squeeze())
+        self.test_r2.update(y_pred, y_true.squeeze())
+        self.test_rmse.update(y_pred, y_true.squeeze())
+        self.test_mae.update(y_pred, y_true.squeeze())
+        self.test_pearson.update(y_pred, y_true.squeeze())
+        self.test_spearman.update(y_pred, y_true.squeeze())
         
         return loss
 
@@ -90,13 +124,36 @@ class PhysESA(pl.LightningModule):
         """
         Compute and log final metrics at the end of the test epoch.
         """
+        r2 = self.test_r2.compute()
+        rmse = self.test_rmse.compute()
+        mae = self.test_mae.compute()
+        pearson = self.test_pearson.compute()
+        spearman = self.test_spearman.compute()
+
+        self.log_dict({
+            'test/r2': r2,
+            'test/rmse': rmse,
+            'test/mae': mae,
+            'test/pearson': pearson,
+            'test/spearman': spearman
+        }, logger=True)
+
         print("\n" + "="*30)
         print("      Test Results      ")
         print("="*30)
-        print(f"  R² Score: {self.r2.compute():.4f}")
-        print(f"  RMSE:     {self.rmse.compute():.4f}")
-        print(f"  MAE:      {self.mae.compute():.4f}")
+        print(f"  R² Score: {r2:.4f}")
+        print(f"  RMSE:     {rmse:.4f}")
+        print(f"  MAE:      {mae:.4f}")
+        print(f"  Pearson:  {pearson:.4f}")
+        print(f"  Spearman: {spearman:.4f}")
         print("="*30)
+
+        # Reset metrics
+        self.test_r2.reset()
+        self.test_rmse.reset()
+        self.test_mae.reset()
+        self.test_pearson.reset()
+        self.test_spearman.reset()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
