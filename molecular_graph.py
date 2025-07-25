@@ -3,8 +3,9 @@ import pandas as pd
 import torch
 from Bio import PDB
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdmolops, BRICS
 from torch_geometric.data import Data
+from torch_scatter import scatter_mean
 import json
 import os
 from typing import Tuple, Dict, List, Optional
@@ -64,14 +65,26 @@ class GraphBuilder:
             
         conf = mol.GetConformer()
         atoms_data = []
+        # 用于追踪残基，确保每个残基只分配一个唯一ID
+        residue_map = {}
+        next_residue_id = 0
+
         for atom in mol.GetAtoms():
             if atom.GetSymbol() != 'H':
                 pos = conf.GetAtomPosition(atom.GetIdx())
+                pdb_info = atom.GetPDBResidueInfo()
+                res_id = (pdb_info.GetChainId(), pdb_info.GetResidueNumber())
+                
+                if res_id not in residue_map:
+                    residue_map[res_id] = next_residue_id
+                    next_residue_id += 1
+                
                 atoms_data.append({
                     'atom_idx': atom.GetIdx(),
                     'element': atom.GetSymbol(),
                     'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
-                    'is_ligand': False # 明确标记为非配体
+                    'is_ligand': False,
+                    'group_id': residue_map[res_id] # 蛋白质的group是残基
                 })
         
         return pd.DataFrame(atoms_data), mol
@@ -106,14 +119,25 @@ class GraphBuilder:
             
         conf = mol.GetConformer()
         atoms_data = []
+        # 使用BRICS分解配体为motifs
+        brics_bonds = list(BRICS.FindBRICSBonds(mol))
+        brics_bond_indices = [b[0] for b in brics_bonds]
+        
+        fragmented_mol = Chem.FragmentOnBonds(mol, brics_bond_indices, addDummies=False)
+        motif_map = rdmolops.GetMolFrags(fragmented_mol)
+        
+        # motif_map是一个元组，其长度为原子数，值为每个原子所属的片段(motif)ID
+        
         for atom in mol.GetAtoms():
             if atom.GetSymbol() != 'H':
-                pos = conf.GetAtomPosition(atom.GetIdx())
+                atom_idx = atom.GetIdx()
+                pos = conf.GetAtomPosition(atom_idx)
                 atoms_data.append({
-                    'atom_idx': atom.GetIdx(),
+                    'atom_idx': atom_idx,
                     'element': atom.GetSymbol(),
                     'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
-                    'is_ligand': True
+                    'is_ligand': True,
+                    'group_id': motif_map[atom_idx] # 配体的group是motif
                 })
         
         return pd.DataFrame(atoms_data), mol
@@ -261,8 +285,37 @@ class GraphBuilder:
         
         return torch.cat([dist_features, direction_vectors, charge_product], dim=1)
 
+    def _build_coarse_graph_info(self, atoms_df: pd.DataFrame, positions: torch.Tensor, k_coarse: int = 5) -> Tuple[torch.Tensor, torch.Tensor]:
+        """构建粗粒度图所需的信息"""
+        # 修正group_id，确保配体的motif id不会与蛋白质的残基id重叠
+        ligand_mask = atoms_df['is_ligand'] == True
+        if ligand_mask.any():
+            max_protein_group_id = atoms_df.loc[~ligand_mask, 'group_id'].max()
+            if pd.notna(max_protein_group_id):
+                atoms_df.loc[ligand_mask, 'group_id'] += int(max_protein_group_id) + 1
+
+        # 创建 atom_to_group_idx 映射
+        group_ids = torch.tensor(atoms_df['group_id'].astype('category').cat.codes.values, dtype=torch.long)
+        
+        # 计算每个group的中心坐标
+        group_pos = scatter_mean(positions, group_ids, dim=0)
+        
+        # 在group中心坐标上构建KNN图
+        if group_pos.shape[0] <= k_coarse:
+            # 如果group数量过少，构建全连接图
+            num_groups = group_pos.shape[0]
+            src = torch.arange(num_groups).repeat_interleave(num_groups)
+            dst = torch.arange(num_groups).repeat(num_groups)
+            # 移除自环
+            mask = src != dst
+            coarse_edge_index = torch.stack([src[mask], dst[mask]], dim=0)
+        else:
+            coarse_edge_index = self.build_knn_edges(group_pos, k=k_coarse)
+            
+        return group_ids, coarse_edge_index
+
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
-        """构建包含完整物理信息的界面分子图。"""
+        """构建包含完整物理信息和多尺度信息的界面分子图。"""
         protein_df, protein_mol = self.parse_pdb_file(pdb_file)
         ligand_df, ligand_mol = self.parse_sdf_ligand(sdf_file)
 
@@ -273,7 +326,6 @@ class GraphBuilder:
         interface_atoms_df, interface_pos = self.filter_interface_atoms(protein_df, ligand_df)
         
         if interface_pos.shape[0] <= len(ligand_df):
-            # print(f"DEBUG: build_graph failed for {complex_id} at interface stage. No protein atoms in interface.")
             return None
 
         atom_features = self.get_atom_features(interface_atoms_df, protein_mol, ligand_mol)
@@ -285,15 +337,14 @@ class GraphBuilder:
             
         edge_features = self.get_full_edge_features(edge_index, interface_pos, interface_atoms_df)
         
+        # 构建粗粒度图信息
+        atom_to_group_idx, coarse_edge_index = self._build_coarse_graph_info(interface_atoms_df, interface_pos)
+
         # --- 最终检查，确保所有张量都不包含NaN/inf ---
-        if not torch.all(torch.isfinite(atom_features)):
-            print(f"[错误] 跳过 {complex_id}: 节点特征 'x' 包含无效值 (NaN/inf)。")
-            return None
-        if not torch.all(torch.isfinite(edge_features)):
-            print(f"[错误] 跳过 {complex_id}: 边特征 'edge_attr' 包含无效值 (NaN/inf)。")
-            return None
-        if not torch.all(torch.isfinite(interface_pos)):
-            print(f"[错误] 跳过 {complex_id}: 坐标 'pos' 包含无效值 (NaN/inf)。")
+        if not torch.all(torch.isfinite(atom_features)) or \
+           not torch.all(torch.isfinite(edge_features)) or \
+           not torch.all(torch.isfinite(interface_pos)):
+            print(f"[错误] 跳过 {complex_id}: 特征或坐标包含无效值 (NaN/inf)。")
             return None
 
         return Data(
@@ -301,6 +352,8 @@ class GraphBuilder:
             edge_index=edge_index,
             edge_attr=edge_features,
             pos=interface_pos,
+            atom_to_group_idx=atom_to_group_idx,
+            coarse_edge_index=coarse_edge_index,
             complex_id=complex_id,
             num_atoms=interface_pos.shape[0]
         )
