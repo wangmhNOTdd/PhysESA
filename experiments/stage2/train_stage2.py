@@ -78,7 +78,7 @@ def main():
         'max_epochs': 100,
         'patience': 15,
         'grad_clip': 1.0,
-        'use_fp16': True,
+        'use_fp16': False,
         'num_workers': 8
     }
     
@@ -93,7 +93,7 @@ def main():
         'num_inds': 32,
         'set_max_items': 0, # This will be set dynamically later
         'linear_output_size': 1,
-        'use_fp16': True, # Corresponds to training_config
+        'use_fp16': False, # Corresponds to training_config
         'node_or_edge': "edge", # Renamed from apply_attention_on
         'xformers_or_torch_attn': "xformers",
         'pre_or_post': "pre",
