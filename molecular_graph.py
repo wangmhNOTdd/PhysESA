@@ -185,6 +185,9 @@ class GraphBuilder:
             
             # Gasteiger电荷（用于边特征计算）
             gasteiger_charge = float(atom.GetProp('_GasteigerCharge'))
+            if not np.isfinite(gasteiger_charge):
+                gasteiger_charge = 0.0
+                print(f"[警告] 原子 {row['atom_idx']} (元素 {row['element']}) 的Gasteiger电荷无效，已重置为0。")
             all_atoms_df.at[row.name, 'gasteiger_charge'] = gasteiger_charge
 
             # --- 拼接所有特征 ---
@@ -282,6 +285,17 @@ class GraphBuilder:
             
         edge_features = self.get_full_edge_features(edge_index, interface_pos, interface_atoms_df)
         
+        # --- 最终检查，确保所有张量都不包含NaN/inf ---
+        if not torch.all(torch.isfinite(atom_features)):
+            print(f"[错误] 跳过 {complex_id}: 节点特征 'x' 包含无效值 (NaN/inf)。")
+            return None
+        if not torch.all(torch.isfinite(edge_features)):
+            print(f"[错误] 跳过 {complex_id}: 边特征 'edge_attr' 包含无效值 (NaN/inf)。")
+            return None
+        if not torch.all(torch.isfinite(interface_pos)):
+            print(f"[错误] 跳过 {complex_id}: 坐标 'pos' 包含无效值 (NaN/inf)。")
+            return None
+
         return Data(
             x=atom_features,
             edge_index=edge_index,
