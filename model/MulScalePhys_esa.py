@@ -43,8 +43,8 @@ class MulScalePhysESA(pl.LightningModule):
         coarse_model_config = coarse_esa_config.copy()
         # Node features are the output of the atomic encoder's last layer
         coarse_node_dim = atomic_esa_config['hidden_dims'][-1] 
-        # Edge features are calculated from distances and directions
-        coarse_edge_dim = self.graph_builder.num_gaussians + 3 
+        # Edge features are now concatenation of the two node features
+        coarse_edge_dim = coarse_node_dim * 2
         coarse_model_config['num_features'] = coarse_node_dim
         coarse_model_config['edge_dim'] = coarse_edge_dim
         self.coarse_model = Estimator(**coarse_model_config)
@@ -67,6 +67,11 @@ class MulScalePhysESA(pl.LightningModule):
         # Get intermediate features from the atomic model's encoder by using the flag
         atomic_edge_feats = self.atomic_model(batch, return_edge_features_before_pma=True)
 
+        # Handle the case of empty batches (e.g., during sanity checks)
+        if atomic_edge_feats.shape[0] == 0:
+            # Return a zero tensor with the correct shape [batch_size] and device
+            return torch.zeros(batch.num_graphs, device=self.device)
+
         # --- 2. Pooling and Coarse Graph Construction ---
         # Pool edge features to nodes, then nodes to groups.
         # The features of an edge are pooled to its target node.
@@ -77,13 +82,11 @@ class MulScalePhysESA(pl.LightningModule):
         group_pos = scatter_mean(batch.pos, batch.atom_to_group_idx, dim=0)
         
         # --- 3. Construct Coarse Graph Batch ---
-        # Calculate coarse edge features (distance + direction)
-        coarse_src_pos = group_pos[batch.coarse_edge_index[0]]
-        coarse_dst_pos = group_pos[batch.coarse_edge_index[1]]
-        dist = torch.norm(coarse_dst_pos - coarse_src_pos, p=2, dim=-1).unsqueeze(-1)
-        dist_feats = self.graph_builder.gaussian_basis_functions(dist)
-        dir_feats = F.normalize(coarse_dst_pos - coarse_src_pos, p=2, dim=-1)
-        coarse_edge_attr = torch.cat([dist_feats, dir_feats], dim=-1)
+        # --- 3. Construct Coarse Graph Batch ---
+        # NEW: Edge features are the concatenation of the features of the two nodes they connect.
+        coarse_src_feats = group_node_feats[batch.coarse_edge_index[0]]
+        coarse_dst_feats = group_node_feats[batch.coarse_edge_index[1]]
+        coarse_edge_attr = torch.cat([coarse_src_feats, coarse_dst_feats], dim=-1)
 
         # Create a batch mapping for the coarse graph.
         # The batch index for each group is the same as the batch index of its constituent atoms.
