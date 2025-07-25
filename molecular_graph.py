@@ -131,20 +131,26 @@ class GraphBuilder:
                     brics_bond_indices.append(bond.GetIdx())
         
         fragmented_mol = Chem.FragmentOnBonds(mol, brics_bond_indices, addDummies=False)
-        motif_map = rdmolops.GetMolFrags(fragmented_mol)
-        
-        # motif_map是一个元组，其长度为原子数，值为每个原子所属的片段(motif)ID
-        
+        # 修复：GetMolFrags返回的原子顺序可能与原分子不同，且原子数可能更少。
+        # 我们需要创建一个从原始原子索引到motif ID的稳定映射。
+        atom_to_motif_map = {}
+        for motif_id, atom_indices in enumerate(rdmolops.GetMolFrags(fragmented_mol, asMols=False)):
+            for atom_idx in atom_indices:
+                atom_to_motif_map[atom_idx] = motif_id
+
         for atom in mol.GetAtoms():
             if atom.GetSymbol() != 'H':
                 atom_idx = atom.GetIdx()
                 pos = conf.GetAtomPosition(atom_idx)
+                # 如果一个原子在断裂后被移除，它将不会在map中，我们给它一个默认的-1
+                group_id = atom_to_motif_map.get(atom_idx, -1)
+                
                 atoms_data.append({
                     'atom_idx': atom_idx,
                     'element': atom.GetSymbol(),
                     'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
                     'is_ligand': True,
-                    'group_id': motif_map[atom_idx] # 配体的group是motif
+                    'group_id': group_id
                 })
         
         return pd.DataFrame(atoms_data), mol
