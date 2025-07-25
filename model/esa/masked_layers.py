@@ -326,12 +326,12 @@ class SABComplete(nn.Module):
                 out_mlp = self.mlp(out_mlp)
                 if out.shape[-1] == out_mlp.shape[-1]:
                     out = out_mlp + out
-
-            if self.pre_or_post == "post":
+            elif self.pre_or_post == "post":
                 out_mlp = self.mlp(out)
                 if out.shape[-1] == out_mlp.shape[-1]:
                     out = self.residual_mlp(out, out_mlp)
                 out = self.norm_mlp(out)
+        # If not using MLP, 'out' is already defined from the attention block
 
         if self.residual_dropout > 0:
             out = F.dropout(out, p=self.residual_dropout)
@@ -643,59 +643,35 @@ class ESA(nn.Module):
             self.dim_pma = dim_pma
 
 
-    def forward(self, X, edge_index, batch_mapping, num_max_items):
-
+    def forward(self, X, edge_index, batch_mapping, num_max_items, return_edge_features_before_pma=False):
         adj_mask = None
-        if self.node_or_edge == "node":
-            adj_mask = get_adj_mask_from_edge_index_node(
-                edge_index=edge_index,
-                batch_mapping=batch_mapping,
-                batch_size=X.shape[0],
-                max_items=self.set_max_items,
-                xformers_or_torch_attn=self.xformers_or_torch_attn,
-                dtype=X.dtype, # 动态传递dtype
-            )
-        elif self.node_or_edge == "edge":
-            adj_mask = get_adj_mask_from_edge_index_edge(
-                edge_index=edge_index,
-                batch_mapping=batch_mapping,
-                batch_size=X.shape[0],
-                max_items=self.set_max_items,
-                xformers_or_torch_attn=self.xformers_or_torch_attn,
-                dtype=X.dtype, # 动态传递dtype
+        if self.node_or_edge == "edge":
+             adj_mask = get_adj_mask_from_edge_index_edge(
+                edge_index=edge_index, batch_mapping=batch_mapping, batch_size=X.shape[0],
+                max_items=self.set_max_items, xformers_or_torch_attn=self.xformers_or_torch_attn, dtype=X.dtype,
             )
 
-        # Pad the mask to match the padded input tensor X for hardware efficiency
         if adj_mask is not None:
-            current_size = adj_mask.shape[-1]
-            target_size = X.shape[1]
-
-            if current_size < target_size:
-                pad_amount = target_size - current_size
-                # Pad the last two dimensions (height and width of the mask)
+            pad_amount = X.shape[1] - adj_mask.shape[-1]
+            if pad_amount > 0:
                 padding = (0, pad_amount, 0, pad_amount)
-                
-                # Use the correct fill value for the attention backend
-                if self.xformers_or_torch_attn in ["torch"]:
-                    # This value will be inverted to True (attend) for padded tokens
-                    pad_value = False
-                else:
-                    # This is a large negative number to ensure padded tokens are ignored
-                    pad_value = -99999
-                
+                pad_value = -99999 if self.xformers_or_torch_attn != "torch" else False
                 adj_mask = F.pad(adj_mask, padding, "constant", value=pad_value)
 
         enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
+        
         if hasattr(self, "dim_pma") and self.dim_hidden[0] != self.dim_pma:
             X = self.out_proj(X)
-
         enc = enc + X
+
+        if return_edge_features_before_pma:
+            return enc
 
         if hasattr(self, "decoder"):
             out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask))
             out = out.mean(dim=1)
         else:
-            out = enc
+            out = enc.mean(dim=1)
 
         return F.mish(self.decoder_linear(out))
 
@@ -775,7 +751,7 @@ class Estimator(nn.Module):
         )
 
         # MLP to process combined node and edge features before attention
-        self.node_edge_mlp = SmallMLP(
+        self.feature_pre_mlp = SmallMLP(
             in_dim=num_features * 2 + edge_dim,
             out_dim=graph_dim,
             inter_dim=graph_dim * 2,
@@ -783,29 +759,29 @@ class Estimator(nn.Module):
             dropout_p=0.1
         )
 
-    def forward(self, batch: Batch) -> torch.Tensor:
-        """
-        Handles the full graph processing pipeline.
-        """
+    def forward(self, batch: Batch, return_edge_features_before_pma=False):
         x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
-        num_max_items = batch.max_edge_global.item()
+        
+        if hasattr(batch, 'max_edge_global'):
+            num_max_items = batch.max_edge_global.item()
+        else: # Fallback for coarse graph
+            edge_batch_index_temp = batch_mapping.index_select(0, edge_index[0, :])
+            num_max_items = to_dense_batch(torch.ones(edge_index.shape[1]), edge_batch_index_temp)[0].shape[1]
 
-        # 1. Create edge features from node features
         source = x[edge_index[0, :], :]
         target = x[edge_index[1, :], :]
         h = torch.cat((source, target), dim=1)
-
         if edge_attr is not None:
             h = torch.cat((h, edge_attr.float()), dim=1)
 
-        # 2. Project edge features to the graph dimension
-        h = self.node_edge_mlp(h)
-
-        # 3. Convert to dense batch for the attention mechanism
-        edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
-        h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
-
-        # 4. Pass through the core ESA model
-        predictions = self.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items)
+        h = self.feature_pre_mlp(h)
         
-        return predictions.squeeze(-1)
+        edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
+        h_dense, h_mask = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
+
+        output = self.st_fast(h_dense, edge_index, batch_mapping, num_max_items=num_max_items, return_edge_features_before_pma=return_edge_features_before_pma)
+        
+        if return_edge_features_before_pma:
+            return output[h_mask] # Un-batch the dense features
+
+        return output.squeeze(-1)
