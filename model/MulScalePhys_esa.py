@@ -42,6 +42,7 @@ class MulScalePhysESA(pl.LightningModule):
         atomic_encoder_config['layer_types'] = atomic_encoder_config['layer_types'][:pool_stop_layer]
         atomic_encoder_config['hidden_dims'] = atomic_encoder_config['hidden_dims'][:pool_stop_layer]
         atomic_encoder_config['num_heads'] = atomic_encoder_config['num_heads'][:pool_stop_layer]
+        atomic_encoder_config.pop('graph_dim', None) # Remove key if it exists
         self.atomic_esa_encoder = ESA(
             num_outputs=1, dim_output=1, **atomic_encoder_config
         )
@@ -55,6 +56,7 @@ class MulScalePhysESA(pl.LightningModule):
             inter_dim=coarse_esa_config['hidden_dims'][0] * 2,
             num_layers=2, dropout_p=0.1
         )
+        coarse_esa_config.pop('graph_dim', None) # Remove key if it exists
         self.coarse_esa = ESA(**coarse_esa_config)
 
         self.setup_metrics()
