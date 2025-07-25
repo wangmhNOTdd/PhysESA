@@ -99,8 +99,7 @@ def main():
         atomic_esa_config=atomic_esa_config,
         coarse_esa_config=coarse_esa_config,
         training_config=training_config,
-        graph_builder_config=metadata['graph_builder_config'],
-        pool_stop_layer=3 # 在原子层第3层后进行池化
+        graph_builder_config=metadata['graph_builder_config']
     )
 
     # --- 5. 设置训练器 ---

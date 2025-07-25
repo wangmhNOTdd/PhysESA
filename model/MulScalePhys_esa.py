@@ -6,62 +6,48 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 from torch_geometric.data import Batch
-from torch_geometric.utils import to_dense_batch
 from torch.nn import functional as F
 from torch_scatter import scatter_mean
 from torchmetrics import R2Score, MeanSquaredError, MeanAbsoluteError, PearsonCorrCoef, SpearmanCorrCoef
 
-from model.esa.masked_layers import ESA
-from model.esa.mlp_utils import SmallMLP
+# Correctly import the Estimator wrapper class
+from model.esa.masked_layers import Estimator
 from molecular_graph import GraphBuilder
 
 class MulScalePhysESA(pl.LightningModule):
     """
-    A multi-scale wrapper that uses a two-stage ESA model.
-    This implementation directly uses the core ESA module, bypassing the Estimator wrapper.
+    A multi-scale wrapper that uses a two-stage Estimator model.
+    1. An atomic-level Estimator processes the initial graph.
+    2. Intermediate features are pooled to form a coarse-grained graph.
+    3. A coarse-grained Estimator processes the new graph for the final prediction.
     """
-    def __init__(self, atomic_esa_config: dict, coarse_esa_config: dict, training_config: dict, graph_builder_config: dict, pool_stop_layer: int = 3):
+    def __init__(self, atomic_esa_config: dict, coarse_esa_config: dict, training_config: dict, graph_builder_config: dict):
         super().__init__()
         self.save_hyperparameters()
 
         self.training_config = training_config
-        self.pool_stop_layer = pool_stop_layer
-
+        
+        # Graph builder is needed for coarse edge feature calculation
         self.graph_builder = GraphBuilder(**graph_builder_config)
         feature_dims = self.graph_builder.get_feature_dimensions()
 
         # --- Atomic Level Model ---
-        self.atomic_feature_pre_mlp = SmallMLP(
-            in_dim=feature_dims['node_dim'] * 2 + feature_dims['edge_dim'],
-            out_dim=atomic_esa_config['hidden_dims'][0],
-            inter_dim=atomic_esa_config['hidden_dims'][0] * 2,
-            num_layers=2, dropout_p=0.1
-        )
-        # We only need the encoder part of the atomic ESA
-        atomic_encoder_config = atomic_esa_config.copy()
-        atomic_encoder_config['layer_types'] = atomic_encoder_config['layer_types'][:pool_stop_layer]
-        atomic_encoder_config['hidden_dims'] = atomic_encoder_config['hidden_dims'][:pool_stop_layer]
-        atomic_encoder_config['num_heads'] = atomic_encoder_config['num_heads'][:pool_stop_layer]
-        atomic_encoder_config.pop('graph_dim', None) # Remove key if it exists
-        # 修复: ESA 期望 'dim_hidden', 而不是 'hidden_dims'
-        atomic_encoder_config['dim_hidden'] = atomic_encoder_config.pop('hidden_dims')
-        self.atomic_esa_encoder = ESA(
-            num_outputs=1, dim_output=1, **atomic_encoder_config
-        )
+        # The Estimator handles its own feature preprocessing MLP
+        atomic_model_config = atomic_esa_config.copy()
+        atomic_model_config['num_features'] = feature_dims['node_dim']
+        atomic_model_config['edge_dim'] = feature_dims['edge_dim']
+        self.atomic_model = Estimator(**atomic_model_config)
 
         # --- Coarse-Grained Level Model ---
-        coarse_node_dim = atomic_esa_config['hidden_dims'][pool_stop_layer - 1]
-        coarse_edge_dim = self.graph_builder.num_gaussians + 3
-        self.coarse_feature_pre_mlp = SmallMLP(
-            in_dim=coarse_node_dim * 2 + coarse_edge_dim,
-            out_dim=coarse_esa_config['hidden_dims'][0],
-            inter_dim=coarse_esa_config['hidden_dims'][0] * 2,
-            num_layers=2, dropout_p=0.1
-        )
-        coarse_esa_config.pop('graph_dim', None) # Remove key if it exists
-        # 修复: ESA 期望 'dim_hidden', 而不是 'hidden_dims'
-        coarse_esa_config['dim_hidden'] = coarse_esa_config.pop('hidden_dims')
-        self.coarse_esa = ESA(**coarse_esa_config)
+        # The input features for the coarse model are the output of the atomic encoder
+        coarse_model_config = coarse_esa_config.copy()
+        # Node features are the output of the atomic encoder's last layer
+        coarse_node_dim = atomic_esa_config['hidden_dims'][-1] 
+        # Edge features are calculated from distances and directions
+        coarse_edge_dim = self.graph_builder.num_gaussians + 3 
+        coarse_model_config['num_features'] = coarse_node_dim
+        coarse_model_config['edge_dim'] = coarse_edge_dim
+        self.coarse_model = Estimator(**coarse_model_config)
 
         self.setup_metrics()
 
@@ -78,48 +64,42 @@ class MulScalePhysESA(pl.LightningModule):
 
     def forward(self, batch: Batch) -> torch.Tensor:
         # --- 1. Atomic-Level Processing ---
-        source = batch.x[batch.edge_index[0, :], :]
-        target = batch.x[batch.edge_index[1, :], :]
-        h_atomic = torch.cat([source, target, batch.edge_attr.float()], dim=1)
-        h_atomic = self.atomic_feature_pre_mlp(h_atomic)
-        
-        edge_batch_index = batch.batch.index_select(0, batch.edge_index[0, :])
-        h_atomic_dense, h_atomic_mask = to_dense_batch(h_atomic, edge_batch_index, fill_value=0)
-        
-        # Pass through atomic encoder
-        atomic_edge_feats_dense = self.atomic_esa_encoder(
-            h_atomic_dense, batch.edge_index, batch.batch, num_max_items=h_atomic_dense.shape[1],
-            return_edge_features_before_pma=True
-        )
-        atomic_edge_feats = atomic_edge_feats_dense[h_atomic_mask]
+        # Get intermediate features from the atomic model's encoder by using the flag
+        atomic_edge_feats = self.atomic_model(batch, return_edge_features_before_pma=True)
 
         # --- 2. Pooling and Coarse Graph Construction ---
+        # Pool edge features to nodes, then nodes to groups.
+        # The features of an edge are pooled to its target node.
         atomic_node_feats = scatter_mean(atomic_edge_feats, batch.edge_index[1], dim=0, dim_size=batch.num_nodes)
         group_node_feats = scatter_mean(atomic_node_feats, batch.atom_to_group_idx, dim=0)
+        
+        # Also pool atom positions to get group center-of-mass
         group_pos = scatter_mean(batch.pos, batch.atom_to_group_idx, dim=0)
         
-        coarse_src_pos, coarse_dst_pos = group_pos[batch.coarse_edge_index[0]], group_pos[batch.coarse_edge_index[1]]
-        dist = torch.norm(coarse_dst_pos - coarse_src_pos, dim=-1)
+        # --- 3. Construct Coarse Graph Batch ---
+        # Calculate coarse edge features (distance + direction)
+        coarse_src_pos = group_pos[batch.coarse_edge_index[0]]
+        coarse_dst_pos = group_pos[batch.coarse_edge_index[1]]
+        dist = torch.norm(coarse_dst_pos - coarse_src_pos, p=2, dim=-1).unsqueeze(-1)
         dist_feats = self.graph_builder.gaussian_basis_functions(dist)
         dir_feats = F.normalize(coarse_dst_pos - coarse_src_pos, p=2, dim=-1)
-        coarse_edge_feats = torch.cat([dist_feats, dir_feats], dim=1)
+        coarse_edge_attr = torch.cat([dist_feats, dir_feats], dim=-1)
 
-        # --- 3. Coarse-Grained Level Processing ---
-        coarse_src_feats = group_node_feats[batch.coarse_edge_index[0]]
-        coarse_dst_feats = group_node_feats[batch.coarse_edge_index[1]]
-        h_coarse = torch.cat([coarse_src_feats, coarse_dst_feats, coarse_edge_feats], dim=1)
-        h_coarse = self.coarse_feature_pre_mlp(h_coarse)
-
-        # Need to create a batch mapping for the coarse graph
-        num_groups = group_node_feats.shape[0]
-        _, group_batch_mapping = torch.unique(batch.atom_to_group_idx, return_inverse=True)
+        # Create a batch mapping for the coarse graph.
+        # The batch index for each group is the same as the batch index of its constituent atoms.
         group_batch_mapping = scatter_mean(batch.batch.float(), batch.atom_to_group_idx, dim=0).long()
 
-        h_coarse_dense, _ = to_dense_batch(h_coarse, group_batch_mapping.index_select(0, batch.coarse_edge_index[0]))
-
-        predictions = self.coarse_esa(
-            h_coarse_dense, batch.coarse_edge_index, group_batch_mapping, num_max_items=h_coarse_dense.shape[1]
+        coarse_batch = Batch(
+            x=group_node_feats,
+            edge_index=batch.coarse_edge_index,
+            edge_attr=coarse_edge_attr,
+            batch=group_batch_mapping,
+            pos=group_pos,
+            num_graphs=batch.num_graphs
         )
+
+        # --- 4. Coarse-Grained Level Processing ---
+        predictions = self.coarse_model(coarse_batch)
         
         return predictions
 
@@ -181,6 +161,6 @@ class MulScalePhysESA(pl.LightningModule):
             self.parameters(), lr=self.training_config['learning_rate'], weight_decay=self.training_config['weight_decay']
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5
+            optimizer, mode='min', factor=0.5, patience=self.training_config.get('lr_patience', 5)
         )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": "val_loss"}}
