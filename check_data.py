@@ -1,118 +1,75 @@
-"""
-验证生成的数据文件
-检查KNN连边和验证集是否正确生成
-"""
-
-import os
 import pickle
-import json
-import numpy as np
+import torch
+import os
+import random
 
-def check_generated_data():
-    """检查生成的数据文件"""
+def check_sample(data):
+    """检查单个数据样本的多尺度映射关系。"""
+    print(f"--- 正在检查复合物: {data.complex_id} ---")
     
-    stage1_dir = "./experiments/stage1"
+    num_atomic_nodes = data.num_nodes
+    num_coarse_nodes = data.num_coarse_nodes
+    atom_to_coarse_map = data.atom_to_coarse_idx
     
-    print("=== 数据文件检查 ===")
+    print(f"原子图节点数: {num_atomic_nodes}")
+    print(f"粗粒度图节点数: {num_coarse_nodes}")
+    print(f"映射张量 'atom_to_coarse_idx' 的长度: {len(atom_to_coarse_map)}")
     
-    # 检查必需文件
-    required_files = ["train.pkl", "valid.pkl", "test.pkl", "metadata.json"]
-    missing_files = []
-    
-    for file in required_files:
-        file_path = os.path.join(stage1_dir, file)
-        if os.path.exists(file_path):
-            print(f"✅ {file}")
-        else:
-            print(f"❌ {file} - 文件缺失")
-            missing_files.append(file)
-    
-    if missing_files:
-        print(f"\n⚠️  缺失文件: {missing_files}")
-        print("请运行数据预处理: python prepare_stage1_data.py --test_run")
+    # 验证1：映射张量的长度是否等于原子节点数
+    if len(atom_to_coarse_map) == num_atomic_nodes:
+        print("✅ [通过] 映射张量长度正确。")
+    else:
+        print(f"❌ [失败] 映射张量长度 ({len(atom_to_coarse_map)}) 与原子节点数 ({num_atomic_nodes}) 不匹配！")
         return False
-    
-    # 检查元数据
-    print("\n=== 元数据检查 ===")
-    try:
-        with open(os.path.join(stage1_dir, "metadata.json"), 'r') as f:
-            metadata = json.load(f)
-        
-        print(f"✅ 连边方式: {metadata['edge_connection']['method']}")
-        if metadata['edge_connection']['method'] == 'knn':
-            print(f"✅ K值: {metadata['edge_connection']['k']}")
+
+    # 验证2：映射张量中的索引是否有效
+    if num_coarse_nodes > 0:
+        max_mapped_idx = torch.max(atom_to_coarse_map)
+        if max_mapped_idx == num_coarse_nodes - 1:
+            print("✅ [通过] 映射张量的最大索引值正确。")
         else:
-            print(f"✅ 截断半径: {metadata['edge_connection']['radius']}")
-        
-        print(f"✅ 特征维度: {metadata['feature_dimensions']}")
-        
-        # 检查数据集统计
-        stats = metadata['dataset_stats']
-        print(f"\n数据集统计:")
-        for split_name, split_stats in stats.items():
-            print(f"  {split_name}: {split_stats['num_samples']} 样本")
-        
-        # 验证验证集是否存在
-        if 'valid' in stats and stats['valid']['num_samples'] > 0:
-            print("✅ 验证集已正确生成")
-        else:
-            print("❌ 验证集缺失或为空")
+            print(f"❌ [失败] 映射张量最大索引 ({max_mapped_idx}) 与预期 ({num_coarse_nodes - 1}) 不符！")
             return False
-            
-    except Exception as e:
-        print(f"❌ 元数据读取失败: {e}")
-        return False
-    
-    # 检查数据格式
-    print("\n=== 数据格式检查 ===")
-    try:
-        # 检查训练数据
-        with open(os.path.join(stage1_dir, "train.pkl"), 'rb') as f:
-            train_data = pickle.load(f)
-        
-        if len(train_data) > 0:
-            sample = train_data[0]
-            print(f"✅ 训练样本数: {len(train_data)}")
-            print(f"✅ 样本格式检查:")
-            print(f"   - edge_representations: {sample['edge_representations'].shape}")
-            print(f"   - 边数: {sample['num_edges']}")
-            print(f"   - 节点数: {sample['num_nodes']}")
-            print(f"   - 亲和力: {sample['affinity']:.3f}")
-            
-            # 检查边数是否合理（KNN应该产生相对固定的边数）
-            edge_counts = [s['num_edges'] for s in train_data[:10]]  # 检查前10个样本
-            edge_mean = np.mean(edge_counts)
-            edge_std = np.std(edge_counts)
-            
-            print(f"   - 边数统计 (前10个样本): 均值={edge_mean:.1f}, 标准差={edge_std:.1f}")
-            
-            if metadata['edge_connection']['method'] == 'knn':
-                expected_edges_per_node = metadata['edge_connection']['k']
-                print(f"   - KNN预期边数比例: {expected_edges_per_node} 边/节点")
-                
-        # 检查验证数据
-        with open(os.path.join(stage1_dir, "valid.pkl"), 'rb') as f:
-            valid_data = pickle.load(f)
-        print(f"✅ 验证样本数: {len(valid_data)}")
-        
-        # 检查测试数据  
-        with open(os.path.join(stage1_dir, "test.pkl"), 'rb') as f:
-            test_data = pickle.load(f)
-        print(f"✅ 测试样本数: {len(test_data)}")
-        
-    except Exception as e:
-        print(f"❌ 数据格式检查失败: {e}")
-        return False
-    
-    print("\n=== 检查完成 ===")
-    print("✅ 所有检查通过！数据已准备就绪")
-    
-    # 建议下一步
-    print("\n下一步:")
-    print("1. 运行训练测试: python ./experiments/stage1/train_stage1.py --test_run")
-    print("2. 完整训练: bash run_stage1.sh")
-    
+    elif len(atom_to_coarse_map) > 0:
+         print(f"❌ [失败] 粗粒度节点数为0，但映射张量不为空！")
+         return False
+    else: # num_coarse_nodes is 0 and map is empty
+        print("✅ [通过] 粗粒度节点数和映射张量都为空，情况一致。")
+
+
+    print(f"前20个原子到粗粒度节点的映射: {atom_to_coarse_map[:20].tolist()}")
+    print("-" * 30 + "\n")
     return True
 
+def main():
+    data_path = './experiments/stage2/train.pkl'
+    if not os.path.exists(data_path):
+        print(f"错误: 数据文件未找到 at '{data_path}'")
+        print("请先运行 'experiments/stage2/prepare_stage2_data.py'")
+        return
+
+    with open(data_path, 'rb') as f:
+        dataset = pickle.load(f)
+        
+    if not dataset:
+        print("错误: 数据集为空。")
+        return
+        
+    print(f"成功加载数据集，总样本数: {len(dataset)}")
+    
+    # 随机抽取5个样本进行检查
+    num_samples_to_check = min(5, len(dataset))
+    samples_to_check = random.sample(dataset, num_samples_to_check)
+    
+    all_passed = True
+    for sample in samples_to_check:
+        if not check_sample(sample):
+            all_passed = False
+            
+    if all_passed:
+        print("\n🎉 所有随机抽样的样本均通过检查！")
+    else:
+        print("\n⚠️ 部分样本未通过检查，请查看上面的日志。")
+
 if __name__ == "__main__":
-    check_generated_data()
+    main()
