@@ -95,6 +95,10 @@ class PhysESA(pl.LightningModule):
         updated_atomic_node_features = scatter_sum(atomic_edge_embeds, source_nodes, dim=0, dim_size=num_atomic_nodes)
 
         # --- 2b. 原子 -> 粗粒度节点: 将更新后的原子特征池化到粗粒度图 ---
+        # 增加断言，检查维度匹配
+        assert updated_atomic_node_features.shape[0] == batch.atom_to_coarse_idx.shape[0], \
+            f"Shape mismatch! updated_atomic_node_features: {updated_atomic_node_features.shape[0]}, atom_to_coarse_idx: {batch.atom_to_coarse_idx.shape[0]}"
+            
         coarse_node_features = scatter_sum(
             updated_atomic_node_features,
             batch.atom_to_coarse_idx,
