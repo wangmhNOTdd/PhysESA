@@ -96,7 +96,7 @@ def main():
         'weight_decay': 1e-5,
         'lr_patience': 10,
         'batch_size': 8,
-        'max_epochs': 100,
+        'max_epochs': 1,
         'patience': 15,
         'grad_clip': 1.0,
         'use_fp16': False,

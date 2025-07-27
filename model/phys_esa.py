@@ -43,6 +43,10 @@ class PhysESA(pl.LightningModule):
         atomic_config.pop('linear_output_size', None)
         atomic_config['num_features'] = feature_dims['node_dim']
         atomic_config['edge_dim'] = feature_dims['edge_dim']
+        atomic_config['set_max_items'] = esa_config['atomic_set_max_items']
+        # 清理临时的键
+        atomic_config.pop('atomic_set_max_items', None)
+        atomic_config.pop('coarse_set_max_items', None)
         
         self.atomic_encoder = Estimator(**atomic_config)
 
@@ -51,10 +55,12 @@ class PhysESA(pl.LightningModule):
         coarse_config['layer_types'] = ['M', 'S', 'P', 'S']
         coarse_config['hidden_dims'] = [128, 128, 128, 128]
         coarse_config['num_heads'] = [8, 8, 8, 8]
-        # 粗粒度编码器的输入特征是原子编码器的输出（边表示），维度为graph_dim
-        # 它的边特征是空的，因为我们只池化节点
         coarse_config['num_features'] = atomic_config['graph_dim']
-        coarse_config['edge_dim'] = 0 # 没有显式的粗粒度边特征
+        coarse_config['edge_dim'] = 0
+        coarse_config['set_max_items'] = esa_config['coarse_set_max_items']
+        # 清理临时的键
+        coarse_config.pop('atomic_set_max_items', None)
+        coarse_config.pop('coarse_set_max_items', None)
         
         self.coarse_encoder = Estimator(**coarse_config)
 
