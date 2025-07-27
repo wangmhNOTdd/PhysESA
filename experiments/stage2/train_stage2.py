@@ -38,16 +38,34 @@ class Stage2Dataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-class Collater:
-    """将Data对象列表批处理为Batch对象"""
-    def __init__(self, global_max_edges: int, global_max_nodes: int):
-        self.global_max_edges = global_max_edges
-        self.global_max_nodes = global_max_nodes
+class MultiScaleCollater:
+    """
+    为多尺度图数据定制的Collater。
+    它负责正确批处理包含原子和粗粒度图信息的Data对象。
+    """
+    def __init__(self, atomic_max_nodes, atomic_max_edges, coarse_max_nodes, coarse_max_edges):
+        self.atomic_max_nodes = atomic_max_nodes
+        self.atomic_max_edges = atomic_max_edges
+        self.coarse_max_nodes = coarse_max_nodes
+        self.coarse_max_edges = coarse_max_edges
 
     def __call__(self, batch: List[Any]) -> Batch:
+        # 使用PyG的默认批处理
         batch_data = Batch.from_data_list(batch)
-        batch_data.max_node_global = torch.tensor([self.global_max_nodes], dtype=torch.long)
-        batch_data.max_edge_global = torch.tensor([self.global_max_edges], dtype=torch.long)
+        
+        # --- 为粗粒度图手动创建batch和ptr ---
+        coarse_num_nodes_list = [data.num_coarse_nodes for data in batch]
+        coarse_batch_list = [torch.full((num,), i, dtype=torch.long) for i, num in enumerate(coarse_num_nodes_list)]
+        
+        batch_data.coarse_batch = torch.cat(coarse_batch_list, dim=0)
+        batch_data.coarse_ptr = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(coarse_num_nodes_list), 0)], dim=0)
+
+        # --- 将最大尺寸附加到批处理对象中 ---
+        batch_data.max_node_global = torch.tensor([self.atomic_max_nodes], dtype=torch.long)
+        batch_data.max_edge_global = torch.tensor([self.atomic_max_edges], dtype=torch.long)
+        batch_data.coarse_max_node_global = torch.tensor([self.coarse_max_nodes], dtype=torch.long)
+        batch_data.coarse_max_edge_global = torch.tensor([self.coarse_max_edges], dtype=torch.long)
+        
         return batch_data
 
 def main():
@@ -66,8 +84,11 @@ def main():
     
     # --- 1. 加载配置 ---
     metadata_path = os.path.join(args.data_dir, 'metadata.json')
+    if not os.path.exists(metadata_path):
+        raise FileNotFoundError(f"元数据文件未找到: {metadata_path}。请先运行prepare_stage2_data.py。")
     with open(metadata_path, 'r') as f:
         metadata = json.load(f)
+    feature_dims = metadata['feature_dimensions']
     
     # 默认训练配置
     training_config = {
@@ -116,24 +137,42 @@ def main():
     val_dataset = Stage2Dataset(os.path.join(args.data_dir, 'valid.pkl'))
     test_dataset = Stage2Dataset(os.path.join(args.data_dir, 'test.pkl'))
     
-    # 计算全局最大节点/边数
-    all_node_counts = [data.num_nodes for data in train_dataset.data + val_dataset.data + test_dataset.data]
-    all_edge_counts = [data.num_edges for data in train_dataset.data + val_dataset.data + test_dataset.data]
+    # --- 为多尺度图计算全局最大节点/边数 ---
+    full_dataset = train_dataset.data + val_dataset.data + test_dataset.data
     
-    # 关键修复：预先计算最终的填充尺寸，并将其传递给所有组件
+    # 原子图
+    atomic_node_counts = [d.num_nodes for d in full_dataset]
+    atomic_edge_counts = [d.edge_index.shape[1] for d in full_dataset]
+    
+    # 粗粒度图
+    coarse_node_counts = [d.num_coarse_nodes for d in full_dataset]
+    coarse_edge_counts = [d.coarse_edge_index.shape[1] for d in full_dataset]
+
     def nearest_multiple_of_8(n):
         return math.ceil(n / 8) * 8
-        
-    raw_max_nodes = max(all_node_counts) if all_node_counts else 0
-    raw_max_edges = max(all_edge_counts) if all_edge_counts else 0
+
+    # 计算原子图的填充尺寸
+    raw_max_atomic_nodes = max(atomic_node_counts) if atomic_node_counts else 0
+    raw_max_atomic_edges = max(atomic_edge_counts) if atomic_edge_counts else 0
+    final_max_atomic_nodes = nearest_multiple_of_8(raw_max_atomic_nodes + 1)
+    final_max_atomic_edges = nearest_multiple_of_8(raw_max_atomic_edges + 1)
+
+    # 计算粗粒度图的填充尺寸
+    raw_max_coarse_nodes = max(coarse_node_counts) if coarse_node_counts else 0
+    raw_max_coarse_edges = max(coarse_edge_counts) if coarse_edge_counts else 0
+    final_max_coarse_nodes = nearest_multiple_of_8(raw_max_coarse_nodes + 1)
+    final_max_coarse_edges = nearest_multiple_of_8(raw_max_coarse_edges + 1)
+
+    # 为两个尺度的模型设置填充大小
+    esa_config['atomic_set_max_items'] = raw_max_atomic_edges
+    esa_config['coarse_set_max_items'] = raw_max_coarse_edges
     
-    # ESA模型内部会对 set_max_items + 1，所以我们在这里也这样做以保持一致
-    final_max_nodes = nearest_multiple_of_8(raw_max_nodes + 1)
-    final_max_edges = nearest_multiple_of_8(raw_max_edges + 1)
-    
-    esa_config['set_max_items'] = raw_max_edges # Estimator期望接收原始值
-    
-    collater = Collater(global_max_edges=final_max_edges, global_max_nodes=final_max_nodes)
+    collater = MultiScaleCollater(
+        atomic_max_nodes=final_max_atomic_nodes,
+        atomic_max_edges=final_max_atomic_edges,
+        coarse_max_nodes=final_max_coarse_nodes,
+        coarse_max_edges=final_max_coarse_edges
+    )
     
     train_loader = DataLoader(train_dataset, batch_size=training_config['batch_size'], shuffle=True, num_workers=training_config['num_workers'], collate_fn=collater)
     val_loader = DataLoader(val_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
@@ -143,7 +182,7 @@ def main():
     model = PhysESA(
         esa_config=esa_config,
         training_config=training_config,
-        graph_builder_config=metadata['graph_builder_config']
+        feature_dims=feature_dims
     )
 
     # --- 4. 设置训练器 ---
@@ -180,7 +219,7 @@ def main():
             args.checkpoint,
             esa_config=esa_config,
             training_config=training_config,
-            graph_builder_config=metadata['graph_builder_config']
+            feature_dims=feature_dims
         )
         trainer.test(model_for_test, dataloaders=test_loader)
     else:

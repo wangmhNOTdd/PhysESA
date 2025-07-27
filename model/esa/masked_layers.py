@@ -6,6 +6,7 @@ from torch.nn import functional as F
 from torch_geometric.utils import unbatch_edge_index, to_dense_batch
 from torch_geometric.data import Batch
 
+from typing import Optional
 from utils.norm_layers import BN, LN
 from esa.mha import SAB, PMA
 from esa.mlp_utils import SmallMLP, GatedMLPMulti
@@ -315,22 +316,22 @@ class SABComplete(nn.Module):
 
         if self.pre_or_post == "pre":
             out = X + out_attn
-        
-        if self.pre_or_post == "post":
+        else: # post-norm
             out = self.residual_attn(X, out_attn)
             out = self.norm(out)
-
+        
+        # MLP block
         if self.use_mlp:
+            mlp_input = out
             if self.pre_or_post == "pre":
-                out_mlp = self.norm_mlp(out)
+                out_mlp = self.norm_mlp(mlp_input)
                 out_mlp = self.mlp(out_mlp)
-                if out.shape[-1] == out_mlp.shape[-1]:
-                    out = out_mlp + out
-
-            if self.pre_or_post == "post":
-                out_mlp = self.mlp(out)
-                if out.shape[-1] == out_mlp.shape[-1]:
-                    out = self.residual_mlp(out, out_mlp)
+                if mlp_input.shape[-1] == out_mlp.shape[-1]:
+                    out = out_mlp + mlp_input
+            else: # post-norm
+                out_mlp = self.mlp(mlp_input)
+                if mlp_input.shape[-1] == out_mlp.shape[-1]:
+                    out = self.residual_mlp(mlp_input, out_mlp)
                 out = self.norm_mlp(out)
 
         if self.residual_dropout > 0:
@@ -422,25 +423,24 @@ class PMAComplete(nn.Module):
 
         if self.pre_or_post == "pre" and out_attn.shape[-2] == X.shape[-2]:
             out = X + out_attn
-        
         elif self.pre_or_post == "post" and out_attn.shape[-2] == X.shape[-2]:
             out = self.residual_attn(X, out_attn)
             out = self.norm(out)
-        
         else:
             out = out_attn
 
+        # MLP block
         if self.use_mlp:
+            mlp_input = out
             if self.pre_or_post == "pre":
-                out_mlp = self.norm_mlp(out)
+                out_mlp = self.norm_mlp(mlp_input)
                 out_mlp = self.mlp(out_mlp)
-                if out.shape[-2] == out_mlp.shape[-2]:
-                    out = out_mlp + out
-
-            if self.pre_or_post == "post":
-                out_mlp = self.mlp(out)
-                if out.shape[-2] == out_mlp.shape[-2]:
-                    out = self.residual_mlp(out, out_mlp)
+                if mlp_input.shape[-2] == out_mlp.shape[-2]:
+                    out = out_mlp + mlp_input
+            else: # post-norm
+                out_mlp = self.mlp(mlp_input)
+                if mlp_input.shape[-2] == out_mlp.shape[-2]:
+                    out = self.residual_mlp(mlp_input, out_mlp)
                 out = self.norm_mlp(out)
 
         if self.residual_dropout > 0:
@@ -632,7 +632,7 @@ class ESA(nn.Module):
                 layer_tracker += 1
 
         self.encoder = nn.Sequential(*self.encoder)
-        if pma_encountered:
+        if pma_encountered and hasattr(self, 'decoder'):
             self.decoder = nn.Sequential(*self.decoder)
 
         self.decoder_linear = nn.Linear(dim_hidden[-1], dim_output, bias=True)
@@ -685,14 +685,18 @@ class ESA(nn.Module):
                 
                 adj_mask = F.pad(adj_mask, padding, "constant", value=pad_value)
 
-        enc, _, _, _, _ = self.encoder((X, edge_index, batch_mapping, num_max_items, adj_mask))
+        # 强制转换为nn.Sequential以解决Pylance的误报
+        encoder_module = nn.Sequential(*self.encoder) if isinstance(self.encoder, list) else self.encoder
+        enc, _, _, _, _ = encoder_module((X, edge_index, batch_mapping, num_max_items, adj_mask))
+
         if hasattr(self, "dim_pma") and self.dim_hidden[0] != self.dim_pma:
             X = self.out_proj(X)
 
         enc = enc + X
 
         if hasattr(self, "decoder"):
-            out, _, _, _, _ = self.decoder((enc, edge_index, batch_mapping, num_max_items, adj_mask))
+            decoder_module = nn.Sequential(*self.decoder) if isinstance(self.decoder, list) else self.decoder
+            out, _, _, _, _ = decoder_module((enc, edge_index, batch_mapping, num_max_items, adj_mask))
             out = out.mean(dim=1)
         else:
             out = enc
@@ -737,11 +741,11 @@ class Estimator(nn.Module):
         # --- High-level config params that are now explicitly ignored ---
         # We accept them in the signature to prevent TypeErrors from the old config,
         # but they are not used inside the model itself.
-        task_type: str = None,
-        monitor_loss_name: str = None,
-        regression_loss_fn: str = None,
-        posenc: str = None,
-        apply_attention_on: str = None # To catch the old name
+        task_type: Optional[str] = None,
+        monitor_loss_name: Optional[str] = None,
+        regression_loss_fn: Optional[str] = None,
+        posenc: Optional[str] = None,
+        apply_attention_on: Optional[str] = None # To catch the old name
     ):
         super().__init__()
         # Store key parameters for access by other modules if needed
@@ -783,12 +787,21 @@ class Estimator(nn.Module):
             dropout_p=0.1
         )
 
-    def forward(self, batch: Batch) -> torch.Tensor:
+    def forward(self, batch: Batch, return_embeds: bool = False) -> torch.Tensor:
         """
         Handles the full graph processing pipeline.
+        Can optionally return intermediate edge embeddings for multi-scale architectures.
         """
         x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
-        num_max_items = batch.max_edge_global.item()
+        
+        # 兼容不同版本的max_items获取方式
+        if hasattr(batch, 'max_edge_global'):
+            num_max_items = batch.max_edge_global.item()
+        elif hasattr(batch, 'set_max_items'):
+             num_max_items = batch.set_max_items + 1
+        else:
+            # Fallback if neither is present
+            num_max_items = torch.max(batch.batch).item() + 1
 
         # 1. Create edge features from node features
         source = x[edge_index[0, :], :]
@@ -800,9 +813,15 @@ class Estimator(nn.Module):
 
         # 2. Project edge features to the graph dimension
         h = self.node_edge_mlp(h)
+        edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
+
+        # --- Conditional return for multi-scale models ---
+        if return_embeds:
+            # For the atomic encoder, we return the processed edge embeddings
+            # and the corresponding batch mapping for pooling.
+            return h, edge_batch_index
 
         # 3. Convert to dense batch for the attention mechanism
-        edge_batch_index = batch_mapping.index_select(0, edge_index[0, :])
         h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
         # 4. Pass through the core ESA model

@@ -9,21 +9,27 @@ import json
 import os
 from typing import Tuple, Dict, List, Optional
 
-class GraphBuilder:
+from rdkit.Chem import BRICS
+from collections import defaultdict
+
+class MultiScaleGraphBuilder:
     """
-    统一的、物理信息增强的3D-ESA图构建器。
-    该类整合了从PDB和SDF文件解析分子、识别复合物界面、
-    提取原子和边特征以及构建PyTorch Geometric图对象的完整流程。
+    多尺度、物理信息增强的3D图构建器。
+    该类负责：
+    1. 定义新的复合物界面（基于残基距离）。
+    2. 构建一个细粒度的原子图（atom-level graph）。
+    3. 构建一个粗粒度的官能团/残基图（coarse-grained graph）。
+    4. 提供从原子到粗粒度节点的映射，用于多尺度模型。
     """
     
-    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = False, k: int = 16, interface_cutoff: float = 8.0):
+    def __init__(self, cutoff_radius: float = 5.0, num_gaussians: int = 16, use_knn: bool = False, k: int = 16, interface_cutoff: float = 10.0):
         """
         Args:
             cutoff_radius: 原子间相互作用的截断半径 (Å)，用于半径连边模式。
             num_gaussians: 用于距离编码的高斯基函数的数量。
-            use_knn: 是否使用KNN（K-Nearest Neighbors）方法构建图的边。
+            use_knn: 是否使用KNN方法构建原子图的边。
             k: 在KNN模式下，每个原子连接的最近邻居数量。
-            interface_cutoff: 定义蛋白质-配体界面的距离阈值 (Å)。
+            interface_cutoff: 定义蛋白质-配体界面的距离阈值 (Å)，作用于残基级别。
         """
         self.cutoff_radius = cutoff_radius
         self.num_gaussians = num_gaussians
@@ -31,90 +37,95 @@ class GraphBuilder:
         self.k = k
         self.interface_cutoff = interface_cutoff
         
-        # 高斯基函数参数：从0到cutoff_radius均匀分布
         self.gaussian_centers = torch.linspace(0, cutoff_radius, num_gaussians)
-        self.gaussian_width = (cutoff_radius / num_gaussians) * 0.5  # β参数
+        self.gaussian_width = (cutoff_radius / num_gaussians) * 0.5
 
-        # 特征维度定义
         self.hybridization_types = ['SP', 'SP2', 'SP3', 'SP3D', 'SP3D2', 'UNSPECIFIED']
-        
-        # 节点特征维度:
-        # 原子类型(10) + 形式电荷(1) + 杂化类型(6) + 芳香性(1) + 重邻居数(1) + 总氢数(1) = 20
         self.atom_feature_dim = 10 + 1 + len(self.hybridization_types) + 1 + 1 + 1
-        
-        # 边特征维度:
-        # 距离GBF(num_gaussians) + 方向向量(3) + 电荷乘积(1)
         self.edge_feature_dim = self.num_gaussians + 3 + 1
 
-    def parse_pdb_file(self, pdb_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
-        """
-        使用RDKit解析PDB文件，添加氢原子，并提取重原子信息。
-        """
+        self.pdb_parser = PDB.PDBParser(QUIET=True)
+
+    def _get_residue_info(self, pdb_file: str) -> Dict[int, Dict]:
+        """使用Bio.PDB解析PDB，获取原子序列号到残基信息的映射。"""
+        structure = self.pdb_parser.get_structure("protein", pdb_file)
+        residue_map = {}
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    res_id = f"{chain.id}_{residue.get_resname()}_{residue.get_id()[1]}"
+                    for atom in residue:
+                        residue_map[atom.get_serial_number()] = {
+                            'res_id': res_id,
+                            'res_name': residue.get_resname(),
+                            'res_seq': residue.get_id()[1]
+                        }
+        return residue_map
+
+    def _get_ligand_motifs(self, ligand_mol: Chem.Mol) -> Tuple[List[List[int]], List[str]]:
+        """使用BRICS分解配体，返回每个motif包含的原子索引和motif类型。"""
+        brics_bonds = list(BRICS.FindBRICSBonds(ligand_mol))
+        if not brics_bonds: # 如果分子无法被分解，则整个分子作为一个motif
+            return [[atom.GetIdx() for atom in ligand_mol.GetAtoms()]], ["LIG"]
+
+        bond_indices = [bond[0] for bond in brics_bonds]
+        broken_mol = Chem.FragmentOnBonds(ligand_mol, bond_indices, addDummies=False)
+        motif_atom_indices = Chem.GetMolFrags(broken_mol, asMols=False)
+        
+        motif_ids = [f"LIG_MOTIF_{i}" for i in range(len(motif_atom_indices))]
+        return list(motif_atom_indices), motif_ids
+
+    def parse_protein_with_rdkit(self, pdb_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
+        """使用RDKit解析PDB文件，保留原始原子索引。"""
         mol = Chem.MolFromPDBFile(pdb_file, removeHs=False, sanitize=True)
-        if mol is None:
-            return None, None
+        if mol is None: return None, None
         
         try:
             mol = Chem.AddHs(mol, addCoords=True)
-        except Exception as e:
-            print(f"[警告] 为蛋白质添加氢原子失败: {os.path.basename(pdb_file)}, {e}")
+        except Exception:
+            pass # 忽略加氢失败
 
-        if mol.GetNumConformers() == 0:
-            return None, None
+        if mol.GetNumConformers() == 0: return None, None
             
         conf = mol.GetConformer()
         atoms_data = []
         for atom in mol.GetAtoms():
-            if atom.GetSymbol() != 'H':
-                pos = conf.GetAtomPosition(atom.GetIdx())
-                atoms_data.append({
-                    'atom_idx': atom.GetIdx(),
-                    'element': atom.GetSymbol(),
-                    'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
-                    'is_ligand': False # 明确标记为非配体
-                })
+            pdb_info = atom.GetPDBResidueInfo()
+            if pdb_info is None: continue # 跳过没有PDB信息的原子
+            
+            pos = conf.GetAtomPosition(atom.GetIdx())
+            atoms_data.append({
+                'atom_idx_rdkit': atom.GetIdx(),
+                'atom_serial_number': pdb_info.GetSerialNumber(),
+                'element': atom.GetSymbol(),
+                'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
+                'is_ligand': False
+            })
         
         return pd.DataFrame(atoms_data), mol
 
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
-        """
-        解析SDF文件，提取配体重原子信息，并返回RDKit Mol对象。
-        增加了对常见SDF格式错误的鲁棒性处理。
-        """
-        mol = Chem.MolFromMolFile(sdf_file, sanitize=True)
-        
-        if mol is None:
-            mol = Chem.MolFromMolFile(sdf_file, sanitize=False)
-            if mol is not None:
-                try:
-                    safe_sanitize_ops = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_PROPERTIES
-                    Chem.SanitizeMol(mol, safe_sanitize_ops)
-                except Exception as e:
-                    print(f"[错误] 手动消毒失败: {os.path.basename(sdf_file)}, 错误: {e}")
-                    return None, None
-
-        if mol is None:
-            return None, None
+        """解析SDF文件，提取配体重原子信息。"""
+        mol = Chem.MolFromMolFile(sdf_file, sanitize=True, removeHs=False)
+        if mol is None: return None, None
 
         try:
             mol = Chem.AddHs(mol, addCoords=True)
-        except Exception as e:
-            print(f"[警告] 添加氢原子失败: {os.path.basename(sdf_file)}, {e}")
+        except Exception:
+            pass
 
-        if mol.GetNumConformers() == 0:
-            return None, None
+        if mol.GetNumConformers() == 0: return None, None
             
         conf = mol.GetConformer()
         atoms_data = []
         for atom in mol.GetAtoms():
-            if atom.GetSymbol() != 'H':
-                pos = conf.GetAtomPosition(atom.GetIdx())
-                atoms_data.append({
-                    'atom_idx': atom.GetIdx(),
-                    'element': atom.GetSymbol(),
-                    'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
-                    'is_ligand': True
-                })
+            pos = conf.GetAtomPosition(atom.GetIdx())
+            atoms_data.append({
+                'atom_idx_rdkit': atom.GetIdx(),
+                'element': atom.GetSymbol(),
+                'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
+                'is_ligand': True
+            })
         
         return pd.DataFrame(atoms_data), mol
 
@@ -129,68 +140,34 @@ class GraphBuilder:
         onehot[idx] = 1.0
         return onehot
 
-    def _estimate_heavy_neighbors(self, element: str) -> float:
-        """为PDB文件中的原子估计重原子邻居数。"""
-        estimates = {'C': 2.0, 'N': 1.5, 'O': 1.0, 'S': 2.0, 'P': 3.0}
-        return estimates.get(element, 1.0)
-
     def get_atom_features(self, all_atoms_df: pd.DataFrame, protein_mol: Chem.Mol, ligand_mol: Chem.Mol) -> torch.Tensor:
-        """
-        提取完整的、对称的原子物理化学特征。
-        现在对蛋白质和配体使用完全相同的RDKit特征提取流程。
-        """
-        # 为蛋白质和配体计算Gasteiger电荷
+        """提取完整的原子物理化学特征。"""
         AllChem.ComputeGasteigerCharges(protein_mol)
         AllChem.ComputeGasteigerCharges(ligand_mol)
         
         all_features = []
         for _, row in all_atoms_df.iterrows():
-            is_ligand = row.get('is_ligand', False)
+            mol = ligand_mol if row['is_ligand'] else protein_mol
+            atom = mol.GetAtomWithIdx(int(row['atom_idx_rdkit']))
             
-            # 根据is_ligand标志选择正确的Mol对象
-            mol = ligand_mol if is_ligand else protein_mol
-            
-            # 检查atom_idx是否存在且有效
-            if pd.isna(row['atom_idx']):
-                # 如果一个原子没有索引，我们无法在Mol对象中找到它，只能跳过
-                # 这通常不应该发生，除非数据处理流程有误
-                print(f"[警告] 原子缺少有效索引，跳过特征提取。")
-                continue
-
-            atom = mol.GetAtomWithIdx(int(row['atom_idx']))
-            
-            # --- 统一的特征提取流程 ---
-            # 1. 原子类型 (10维)
             atom_type_oh = self.get_atom_type_onehot(atom.GetSymbol())
-            
-            # 2. 形式电荷 (1维)
             formal_charge = float(atom.GetFormalCharge())
             
-            # 3. 杂化类型 (6维)
             hybridization = str(atom.GetHybridization())
             hybrid_oh = np.zeros(len(self.hybridization_types))
             if hybridization in self.hybridization_types:
                 hybrid_oh[self.hybridization_types.index(hybridization)] = 1.0
             else:
-                hybrid_oh[-1] = 1.0 # UNSPECIFIED
+                hybrid_oh[-1] = 1.0
             
-            # 4. 芳香性 (1维)
             is_aromatic = float(atom.GetIsAromatic())
-            
-            # 5. 重原子邻居数 (1维)
             heavy_neighbors = float(sum(1 for n in atom.GetNeighbors() if n.GetSymbol() != 'H'))
-            
-            # 6. 总氢原子数 (1维)
             total_hydrogens = float(atom.GetTotalNumHs())
             
-            # Gasteiger电荷（用于边特征计算）
             gasteiger_charge = float(atom.GetProp('_GasteigerCharge'))
-            if not np.isfinite(gasteiger_charge):
-                gasteiger_charge = 0.0
-                print(f"[警告] 原子 {row['atom_idx']} (元素 {row['element']}) 的Gasteiger电荷无效，已重置为0。")
+            if not np.isfinite(gasteiger_charge): gasteiger_charge = 0.0
             all_atoms_df.at[row.name, 'gasteiger_charge'] = gasteiger_charge
 
-            # --- 拼接所有特征 ---
             features = np.concatenate([
                 atom_type_oh, [formal_charge], hybrid_oh,
                 [is_aromatic], [heavy_neighbors], [total_hydrogens]
@@ -208,45 +185,21 @@ class GraphBuilder:
     def build_edges(self, positions: torch.Tensor) -> torch.Tensor:
         """根据配置（KNN或半径）构建边。"""
         if self.use_knn:
-            return self.build_knn_edges(positions, self.k)
+            dist_matrix = torch.cdist(positions, positions)
+            dist_matrix.fill_diagonal_(float('inf'))
+            if positions.shape[0] <= self.k:
+                k = positions.shape[0] - 1
+            else:
+                k = self.k
+            if k <= 0:
+                return torch.empty((2, 0), dtype=torch.long)
+            _, knn_indices = torch.topk(dist_matrix, k, dim=1, largest=False)
+            source_indices = torch.arange(positions.shape[0]).unsqueeze(1).expand(-1, knn_indices.shape[1])
+            return torch.stack([source_indices.flatten(), knn_indices.flatten()], dim=0)
         else:
-            return self.build_radius_edges(positions, self.cutoff_radius)
-
-    def build_knn_edges(self, positions: torch.Tensor, k: int) -> torch.Tensor:
-        """使用KNN方法构建边索引。"""
-        num_atoms = positions.shape[0]
-        dist_matrix = torch.cdist(positions, positions)
-        dist_matrix.fill_diagonal_(float('inf'))
-        _, knn_indices = torch.topk(dist_matrix, k, dim=1, largest=False)
-        source_indices = torch.arange(num_atoms).unsqueeze(1).expand(-1, k)
-        return torch.stack([source_indices.flatten(), knn_indices.flatten()], dim=0)
-
-    def build_radius_edges(self, positions: torch.Tensor, cutoff_radius: float) -> torch.Tensor:
-        """使用截断半径方法构建边索引。"""
-        dist_matrix = torch.cdist(positions, positions)
-        mask = (dist_matrix <= cutoff_radius) & (dist_matrix > 0)
-        return torch.nonzero(mask).t()
-
-    def identify_interface_atoms(self, protein_positions: torch.Tensor, ligand_positions: torch.Tensor) -> torch.Tensor:
-        """识别复合物界面的蛋白质原子。"""
-        if protein_positions.nelement() == 0 or ligand_positions.nelement() == 0:
-            return torch.tensor([], dtype=torch.bool)
-        dist_matrix = torch.cdist(protein_positions, ligand_positions)
-        min_distances, _ = torch.min(dist_matrix, dim=1)
-        return min_distances <= self.interface_cutoff
-
-    def filter_interface_atoms(self, protein_df: pd.DataFrame, ligand_df: pd.DataFrame) -> Tuple[pd.DataFrame, torch.Tensor]:
-        """过滤出界面原子，返回包含所有界面原子的DataFrame和坐标。"""
-        protein_pos = torch.tensor(protein_df[['x', 'y', 'z']].values, dtype=torch.float32)
-        ligand_pos = torch.tensor(ligand_df[['x', 'y', 'z']].values, dtype=torch.float32)
-        
-        protein_interface_mask = self.identify_interface_atoms(protein_pos, ligand_pos)
-        interface_protein_df = protein_df[protein_interface_mask.numpy()]
-        
-        interface_atoms_df = pd.concat([interface_protein_df, ligand_df], ignore_index=True)
-        interface_positions = torch.tensor(interface_atoms_df[['x', 'y', 'z']].values, dtype=torch.float32)
-        
-        return interface_atoms_df, interface_positions
+            dist_matrix = torch.cdist(positions, positions)
+            mask = (dist_matrix <= self.cutoff_radius) & (dist_matrix > 0)
+            return torch.nonzero(mask).t()
 
     def get_full_edge_features(self, edge_index: torch.Tensor, positions: torch.Tensor, all_atoms_df: pd.DataFrame) -> torch.Tensor:
         """计算完整的边特征（距离、方向、电荷）。"""
@@ -262,48 +215,101 @@ class GraphBuilder:
         return torch.cat([dist_features, direction_vectors, charge_product], dim=1)
 
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
-        """构建包含完整物理信息的界面分子图。"""
-        protein_df, protein_mol = self.parse_pdb_file(pdb_file)
+        """构建包含多尺度信息的图对象。"""
+        # 1. 解析分子
+        protein_df, protein_mol = self.parse_protein_with_rdkit(pdb_file)
         ligand_df, ligand_mol = self.parse_sdf_ligand(sdf_file)
+        if protein_df is None or ligand_df is None or protein_mol is None or ligand_mol is None: return None
 
-        if protein_df is None or protein_mol is None or ligand_df is None or ligand_mol is None:
-            print(f"[警告] 跳过 {complex_id}: 无法解析PDB/SDF文件。")
-            return None
+        # 2. 定义界面
+        protein_res_map = self._get_residue_info(pdb_file)
+        protein_df['res_id'] = protein_df['atom_serial_number'].map(lambda x: protein_res_map.get(int(x), {}).get('res_id') if pd.notna(x) else None)
         
-        interface_atoms_df, interface_pos = self.filter_interface_atoms(protein_df, ligand_df)
-        
-        if interface_pos.shape[0] <= len(ligand_df):
-            # print(f"DEBUG: build_graph failed for {complex_id} at interface stage. No protein atoms in interface.")
-            return None
+        protein_pos = torch.tensor(protein_df[['x', 'y', 'z']].values, dtype=torch.float32)
+        ligand_pos = torch.tensor(ligand_df[['x', 'y', 'z']].values, dtype=torch.float32)
 
-        atom_features = self.get_atom_features(interface_atoms_df, protein_mol, ligand_mol)
-        edge_index = self.build_edges(interface_pos)
-        
-        if edge_index.shape[1] == 0:
-            print(f"[警告] 跳过 {complex_id}: 界面未发现相互作用边。")
-            return None
-            
-        edge_features = self.get_full_edge_features(edge_index, interface_pos, interface_atoms_df)
-        
-        # --- 最终检查，确保所有张量都不包含NaN/inf ---
-        if not torch.all(torch.isfinite(atom_features)):
-            print(f"[错误] 跳过 {complex_id}: 节点特征 'x' 包含无效值 (NaN/inf)。")
-            return None
-        if not torch.all(torch.isfinite(edge_features)):
-            print(f"[错误] 跳过 {complex_id}: 边特征 'edge_attr' 包含无效值 (NaN/inf)。")
-            return None
-        if not torch.all(torch.isfinite(interface_pos)):
-            print(f"[错误] 跳过 {complex_id}: 坐标 'pos' 包含无效值 (NaN/inf)。")
-            return None
+        dist_matrix = torch.cdist(protein_pos, ligand_pos)
+        min_dist_to_ligand, _ = torch.min(dist_matrix, dim=1)
+        protein_df['min_dist_to_ligand'] = min_dist_to_ligand.numpy()
 
-        return Data(
+        interface_res_ids = protein_df[protein_df['min_dist_to_ligand'] <= self.interface_cutoff]['res_id'].unique()
+        interface_protein_df = protein_df[protein_df['res_id'].isin(interface_res_ids)]
+        
+        if interface_protein_df.empty: return None
+
+        # 3. 准备细粒度图（原子图）
+        atom_df = pd.concat([interface_protein_df, ligand_df], ignore_index=True).reset_index(drop=True)
+        atom_pos = torch.tensor(atom_df[['x', 'y', 'z']].values, dtype=torch.float32)
+        atom_features = self.get_atom_features(atom_df, protein_mol, ligand_mol)
+        atom_edge_index = self.build_edges(atom_pos)
+        if atom_edge_index.shape[1] == 0: return None
+        atom_edge_features = self.get_full_edge_features(atom_edge_index, atom_pos, atom_df)
+
+        # 4. 准备粗粒度图（残基/官能团图）
+        ligand_motifs, ligand_motif_ids = self._get_ligand_motifs(ligand_mol)
+        
+        # 创建从原子到粗粒度节点的映射
+        coarse_node_map = {} # "res_id" or "motif_id" -> new_coarse_idx
+        atom_to_coarse_idx = []
+        
+        # 处理蛋白质残基
+        for res_id in interface_res_ids:
+            if res_id not in coarse_node_map:
+                coarse_node_map[res_id] = len(coarse_node_map)
+        
+        # 处理配体官能团
+        ligand_rdkit_idx_to_motif_id = {}
+        for i, motif_atoms in enumerate(ligand_motifs):
+            motif_id = ligand_motif_ids[i]
+            if motif_id not in coarse_node_map:
+                coarse_node_map[motif_id] = len(coarse_node_map)
+            for atom_idx in motif_atoms:
+                ligand_rdkit_idx_to_motif_id[atom_idx] = motif_id
+
+        # 填充映射向量
+        for _, row in atom_df.iterrows():
+            if row['is_ligand']:
+                motif_id = ligand_rdkit_idx_to_motif_id[row['atom_idx_rdkit']]
+                atom_to_coarse_idx.append(coarse_node_map[motif_id])
+            else:
+                atom_to_coarse_idx.append(coarse_node_map[row['res_id']])
+        
+        atom_to_coarse_idx = torch.tensor(atom_to_coarse_idx, dtype=torch.long)
+
+        # 构建粗粒度图的节点和边
+        num_coarse_nodes = len(coarse_node_map)
+        coarse_pos = torch.zeros(num_coarse_nodes, 3, dtype=torch.float32)
+        coarse_pos.index_add_(0, atom_to_coarse_idx, atom_pos)
+        
+        counts = torch.zeros(num_coarse_nodes, 1, dtype=torch.float32)
+        counts.index_add_(0, atom_to_coarse_idx, torch.ones_like(atom_pos[:, :1]))
+        coarse_pos = coarse_pos / counts.clamp(min=1)
+
+        coarse_edge_index = self.build_edges(coarse_pos) # 在粗粒度节点质心上建边
+
+        # 5. 整合到Data对象
+        data = Data(
             x=atom_features,
-            edge_index=edge_index,
-            edge_attr=edge_features,
-            pos=interface_pos,
+            edge_index=atom_edge_index,
+            edge_attr=atom_edge_features,
+            pos=atom_pos,
             complex_id=complex_id,
-            num_atoms=interface_pos.shape[0]
+            num_nodes=atom_features.shape[0], # 兼容旧版
+            
+            # 多尺度信息
+            atom_to_coarse_idx=atom_to_coarse_idx,
+            coarse_pos=coarse_pos,
+            coarse_edge_index=coarse_edge_index,
+            num_coarse_nodes=num_coarse_nodes
         )
+
+        # 最终检查
+        for key, value in data.items():
+            if torch.is_tensor(value) and (torch.isnan(value).any() or torch.isinf(value).any()):
+                print(f"[错误] 跳过 {complex_id}: 数据字段 '{key}' 包含无效值。")
+                return None
+        
+        return data
 
     def get_feature_dimensions(self) -> Dict[str, int]:
         """返回特征维度信息。"""
