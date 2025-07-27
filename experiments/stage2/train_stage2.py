@@ -50,17 +50,31 @@ class MultiScaleCollater:
         self.coarse_max_edges = coarse_max_edges
 
     def __call__(self, batch: List[Any]) -> Batch:
-        # 使用PyG的默认批处理
+        # 1. PyG的默认批处理会正确处理 `edge_index` 和 `batch` 属性
         batch_data = Batch.from_data_list(batch)
+
+        # 2. 手动处理自定义图属性的批次偏移
+        coarse_node_offset = 0
+        coarse_edge_offset = 0
         
-        # --- 为粗粒度图手动创建batch和ptr ---
+        for i, data in enumerate(batch):
+            # 偏移 atom_to_coarse_idx
+            batch_data.atom_to_coarse_idx[batch_data.ptr[i]:batch_data.ptr[i+1]] += coarse_node_offset
+            
+            # 偏移 coarse_edge_index
+            num_coarse_edges = data.coarse_edge_index.shape[1]
+            batch_data.coarse_edge_index[:, coarse_edge_offset:coarse_edge_offset + num_coarse_edges] += coarse_node_offset
+            
+            coarse_node_offset += data.num_coarse_nodes
+            coarse_edge_offset += num_coarse_edges
+
+        # 3. 为粗粒度图创建batch和ptr (现在可以安全地创建了)
         coarse_num_nodes_list = [data.num_coarse_nodes for data in batch]
         coarse_batch_list = [torch.full((num,), i, dtype=torch.long) for i, num in enumerate(coarse_num_nodes_list)]
-        
         batch_data.coarse_batch = torch.cat(coarse_batch_list, dim=0)
         batch_data.coarse_ptr = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(coarse_num_nodes_list), 0)], dim=0)
 
-        # --- 将最大尺寸附加到批处理对象中 ---
+        # 4. 将最大尺寸附加到批处理对象中
         batch_data.max_node_global = torch.tensor([self.atomic_max_nodes], dtype=torch.long)
         batch_data.max_edge_global = torch.tensor([self.atomic_max_edges], dtype=torch.long)
         batch_data.coarse_max_node_global = torch.tensor([self.coarse_max_nodes], dtype=torch.long)
