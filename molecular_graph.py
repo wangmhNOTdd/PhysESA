@@ -46,21 +46,6 @@ class MultiScaleGraphBuilder:
 
         self.pdb_parser = PDB.PDBParser(QUIET=True)
 
-    def _get_residue_info(self, pdb_file: str) -> Dict[int, Dict]:
-        """使用Bio.PDB解析PDB，获取原子序列号到残基信息的映射。"""
-        structure = self.pdb_parser.get_structure("protein", pdb_file)
-        residue_map = {}
-        for model in structure:
-            for chain in model:
-                for residue in chain:
-                    res_id = f"{chain.id}_{residue.get_resname()}_{residue.get_id()[1]}"
-                    for atom in residue:
-                        residue_map[atom.get_serial_number()] = {
-                            'res_id': res_id,
-                            'res_name': residue.get_resname(),
-                            'res_seq': residue.get_id()[1]
-                        }
-        return residue_map
 
     def _get_ligand_motifs(self, ligand_mol: Chem.Mol) -> Tuple[List[List[int]], List[str]]:
         """使用BRICS分解配体，返回每个motif包含的原子索引和motif类型。"""
@@ -85,34 +70,32 @@ class MultiScaleGraphBuilder:
         motif_ids = [f"LIG_MOTIF_{i}" for i in range(len(motif_atom_indices))]
         return list(motif_atom_indices), motif_ids
 
-    def parse_protein_with_rdkit(self, pdb_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
-        """使用RDKit解析PDB文件，保留原始原子索引。"""
-        mol = Chem.MolFromPDBFile(pdb_file, removeHs=False, sanitize=True)
-        if mol is None: return None, None
-        
+    def parse_protein_with_biopython(self, pdb_file: str) -> Optional[pd.DataFrame]:
+        """
+        使用BioPython解析PDB文件，以获得最完整、最原始的原子和残基信息。
+        这是确保不错过任何界面原子的关键。
+        """
         try:
-            mol = Chem.AddHs(mol, addCoords=True)
-        except Exception:
-            pass # 忽略加氢失败
-
-        if mol.GetNumConformers() == 0: return None, None
-            
-        conf = mol.GetConformer()
-        atoms_data = []
-        for atom in mol.GetAtoms():
-            pdb_info = atom.GetPDBResidueInfo()
-            if pdb_info is None: continue # 跳过没有PDB信息的原子
-            
-            pos = conf.GetAtomPosition(atom.GetIdx())
-            atoms_data.append({
-                'atom_idx_rdkit': atom.GetIdx(),
-                'atom_serial_number': pdb_info.GetSerialNumber(),
-                'element': atom.GetSymbol(),
-                'x': float(pos.x), 'y': float(pos.y), 'z': float(pos.z),
-                'is_ligand': False
-            })
-        
-        return pd.DataFrame(atoms_data), mol
+            structure = self.pdb_parser.get_structure("protein", pdb_file)
+            atoms_data = []
+            for atom in structure.get_atoms():
+                # 跳过氢原子和水分子中的原子
+                if atom.element == 'H' or atom.get_parent().get_resname() == 'HOH':
+                    continue
+                
+                res_id = f"{atom.get_parent().get_parent().id}_{atom.get_parent().get_resname()}_{atom.get_parent().get_id()[1]}"
+                
+                atoms_data.append({
+                    'atom_serial_number': atom.get_serial_number(),
+                    'element': atom.element,
+                    'x': atom.coord[0], 'y': atom.coord[1], 'z': atom.coord[2],
+                    'res_id': res_id,
+                    'is_ligand': False
+                })
+            return pd.DataFrame(atoms_data)
+        except Exception as e:
+            print(f"[错误] BioPython解析PDB失败: {os.path.basename(pdb_file)}, {e}")
+            return None
 
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
         """解析SDF文件，提取配体重原子信息。"""
@@ -224,31 +207,67 @@ class MultiScaleGraphBuilder:
         
         return torch.cat([dist_features, direction_vectors, charge_product], dim=1)
 
+    def _create_protein_mol_from_df(self, pdb_file: str, protein_df: pd.DataFrame) -> Optional[Chem.Mol]:
+        """从DataFrame动态创建只包含界面原子的RDKit Mol对象。"""
+        interface_atom_serials = set(protein_df['atom_serial_number'])
+        pdb_lines = []
+        with open(pdb_file, 'r') as f:
+            for line in f:
+                if line.startswith("ATOM") or line.startswith("HETATM"):
+                    try:
+                        if int(line[6:11]) in interface_atom_serials:
+                            pdb_lines.append(line)
+                    except ValueError:
+                        continue
+        
+        if not pdb_lines: return None
+        
+        pdb_block = "".join(pdb_lines)
+        mol = Chem.MolFromPDBBlock(pdb_block, sanitize=True, removeHs=False)
+        if mol is None: return None
+        
+        try:
+            mol = Chem.AddHs(mol, addCoords=True)
+        except Exception:
+            pass # 忽略加氢失败
+        
+        return mol
+
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
         """构建包含多尺度信息的图对象。"""
         # 1. 解析分子
-        protein_df, protein_mol = self.parse_protein_with_rdkit(pdb_file)
+        protein_df_full = self.parse_protein_with_biopython(pdb_file)
         ligand_df, ligand_mol = self.parse_sdf_ligand(sdf_file)
-        if protein_df is None or ligand_df is None or protein_mol is None or ligand_mol is None: return None
+        if protein_df_full is None or ligand_df is None or ligand_mol is None: return None
 
         # 2. 定义界面
-        protein_res_map = self._get_residue_info(pdb_file)
-        protein_df['res_id'] = protein_df['atom_serial_number'].map(lambda x: protein_res_map.get(int(x), {}).get('res_id') if pd.notna(x) else None)
-        
-        protein_pos = torch.tensor(protein_df[['x', 'y', 'z']].values, dtype=torch.float32)
+        protein_pos = torch.tensor(protein_df_full[['x', 'y', 'z']].values, dtype=torch.float32)
         ligand_pos = torch.tensor(ligand_df[['x', 'y', 'z']].values, dtype=torch.float32)
 
         dist_matrix = torch.cdist(protein_pos, ligand_pos)
         min_dist_to_ligand, _ = torch.min(dist_matrix, dim=1)
-        protein_df['min_dist_to_ligand'] = min_dist_to_ligand.numpy()
-
-        interface_res_ids = protein_df[protein_df['min_dist_to_ligand'] <= self.interface_cutoff]['res_id'].unique()
-        interface_protein_df = protein_df[protein_df['res_id'].isin(interface_res_ids)]
         
-        if interface_protein_df.empty: return None
+        interface_atom_mask = min_dist_to_ligand <= self.interface_cutoff
+        interface_residues = protein_df_full.loc[interface_atom_mask, 'res_id']
+        interface_res_ids = interface_residues.unique()
+        
+        protein_df = protein_df_full[protein_df_full['res_id'].isin(interface_res_ids)]
+        if protein_df.empty: return None
+
+        # 动态创建只包含界面原子的蛋白质Mol对象，用于特征提取
+        protein_mol = self._create_protein_mol_from_df(pdb_file, protein_df)
+        if protein_mol is None: return None
 
         # 3. 准备细粒度图（原子图）
-        atom_df = pd.concat([interface_protein_df, ligand_df], ignore_index=True).reset_index(drop=True)
+        # 为RDKit特征提取准备原子索引映射
+        protein_rdkit_map = {a.GetPDBResidueInfo().GetSerialNumber(): a.GetIdx() for a in protein_mol.GetAtoms() if a.GetPDBResidueInfo()}
+        protein_df['atom_idx_rdkit'] = protein_df['atom_serial_number'].map(protein_rdkit_map)
+        ligand_df['atom_idx_rdkit'] = ligand_df.index
+
+        protein_df.dropna(subset=['atom_idx_rdkit'], inplace=True)
+        if protein_df.empty: return None
+
+        atom_df = pd.concat([protein_df, ligand_df], ignore_index=True).reset_index(drop=True)
         atom_pos = torch.tensor(atom_df[['x', 'y', 'z']].values, dtype=torch.float32)
         atom_features = self.get_atom_features(atom_df, protein_mol, ligand_mol)
         atom_edge_index = self.build_edges(atom_pos)
