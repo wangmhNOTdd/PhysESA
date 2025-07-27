@@ -197,7 +197,14 @@ class MultiScaleGraphBuilder:
             else:
                 k = self.k
             if k <= 0:
-                return torch.empty((2, 0), dtype=torch.long)
+                # 节点数过少，构建全连接图
+                num_atoms = positions.shape[0]
+                if num_atoms <= 1:
+                    return torch.empty((2, 0), dtype=torch.long)
+                
+                adj = torch.ones(num_atoms, num_atoms, dtype=torch.bool)
+                adj.fill_diagonal_(False) # 移除自环
+                return torch.nonzero(adj).t()
             _, knn_indices = torch.topk(dist_matrix, k, dim=1, largest=False)
             source_indices = torch.arange(positions.shape[0]).unsqueeze(1).expand(-1, knn_indices.shape[1])
             return torch.stack([source_indices.flatten(), knn_indices.flatten()], dim=0)

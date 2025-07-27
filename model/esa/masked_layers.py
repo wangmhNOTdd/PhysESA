@@ -794,6 +794,11 @@ class Estimator(nn.Module):
         """
         x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
         
+        # --- 边界情况处理：图中没有边 ---
+        if edge_index is None or edge_index.shape[1] == 0:
+            batch_size = torch.max(batch_mapping).item() + 1
+            return torch.zeros(batch_size, device=x.device, dtype=x.dtype)
+
         # 兼容不同版本的max_items获取方式
         if hasattr(batch, 'max_edge_global'):
             num_max_items = batch.max_edge_global.item()
