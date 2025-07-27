@@ -68,8 +68,18 @@ class MultiScaleGraphBuilder:
         if not brics_bonds: # 如果分子无法被分解，则整个分子作为一个motif
             return [[atom.GetIdx() for atom in ligand_mol.GetAtoms()]], ["LIG"]
 
-        bond_indices = [bond[0] for bond in brics_bonds]
-        broken_mol = Chem.FragmentOnBonds(ligand_mol, bond_indices, addDummies=False)
+        # 修复：正确获取要断开的键的索引
+        bonds_to_break = []
+        for bond_info in brics_bonds:
+            atom_indices = bond_info[0]
+            bond = ligand_mol.GetBondBetweenAtoms(atom_indices[0], atom_indices[1])
+            if bond is not None:
+                bonds_to_break.append(bond.GetIdx())
+        
+        if not bonds_to_break: # 如果没有找到有效的键来断开
+             return [[atom.GetIdx() for atom in ligand_mol.GetAtoms()]], ["LIG"]
+
+        broken_mol = Chem.FragmentOnBonds(ligand_mol, bonds_to_break, addDummies=False)
         motif_atom_indices = Chem.GetMolFrags(broken_mol, asMols=False)
         
         motif_ids = [f"LIG_MOTIF_{i}" for i in range(len(motif_atom_indices))]
