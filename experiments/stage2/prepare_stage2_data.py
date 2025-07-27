@@ -18,12 +18,12 @@ import traceback
 # 添加项目根目录到sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from molecular_graph import GraphBuilder, load_pdbbind_metadata, prepare_split_data
+from molecular_graph import MultiScaleGraphBuilder, load_pdbbind_metadata, prepare_split_data
 
 def process_complex_list(
     complex_ids: List[str],
     data_root: str,
-    graph_builder: GraphBuilder,
+    graph_builder: MultiScaleGraphBuilder,
     metadata: Dict,
     split_name: str
 ) -> List[Data]:
@@ -96,7 +96,7 @@ def main():
     
     os.makedirs(args.output_dir, exist_ok=True)
     
-    graph_builder = GraphBuilder(
+    graph_builder = MultiScaleGraphBuilder(
         cutoff_radius=args.cutoff_radius,
         num_gaussians=args.num_gaussians,
         use_knn=use_knn,
