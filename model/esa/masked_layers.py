@@ -827,6 +827,11 @@ class Estimator(nn.Module):
             return h, edge_batch_index
 
         # 3. Convert to dense batch for the attention mechanism
+        if edge_batch_index.numel() == 0:
+            # 如果批次中没有边，无法进行密集化，直接返回零预测
+            batch_size = torch.max(batch_mapping).item() + 1
+            return torch.zeros(batch_size, device=x.device, dtype=x.dtype)
+
         h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
         # 4. Pass through the core ESA model

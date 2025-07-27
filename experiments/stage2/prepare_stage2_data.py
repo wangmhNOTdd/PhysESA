@@ -50,6 +50,11 @@ def process_complex_list(
         try:
             graph_data = graph_builder.build_graph(complex_id, pdb_file, sdf_file)
             if graph_data is not None:
+                # 验证粗粒度图是否包含边
+                if not hasattr(graph_data, 'coarse_edge_index') or graph_data.coarse_edge_index.shape[1] == 0:
+                    print(f"警告: 跳过 {complex_id}，因为其粗粒度图没有边。")
+                    continue
+                
                 graph_data.y = torch.tensor([affinity], dtype=torch.float32)
                 processed_data.append(graph_data)
         except Exception as e:
