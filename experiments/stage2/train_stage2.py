@@ -50,6 +50,10 @@ class MultiScaleCollater:
         self.coarse_max_edges = coarse_max_edges
 
     def __call__(self, batch: List[Any]) -> Batch:
+        print(f"[DEBUG Collater] Received batch with {len(batch)} samples.")
+        if not batch:
+            return None # 如果批次为空，直接返回
+
         # 1. PyG的默认批处理会正确处理 `edge_index` 和 `batch` 属性
         batch_data = Batch.from_data_list(batch)
 

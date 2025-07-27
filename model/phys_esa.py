@@ -80,6 +80,10 @@ class PhysESA(pl.LightningModule):
         """
         执行多尺度前向传播。
         """
+        print(f"[DEBUG PhysESA] Batch received. Batch keys: {batch.keys}")
+        print(f"[DEBUG PhysESA] coarse_batch tensor: {batch.coarse_batch}")
+        print(f"[DEBUG PhysESA] num_coarse_nodes: {batch.num_coarse_nodes}")
+
         # --- 1. 原子级别编码 ---
         # --- 1. 原子级别编码 ---
         atomic_edge_embeds, _ = self.atomic_encoder(batch, return_embeds=True)
