@@ -38,9 +38,10 @@ class PhysESA(pl.LightningModule):
         atomic_config['layer_types'] = ['M', 'M', 'S']
         atomic_config['hidden_dims'] = [128, 128, 128]
         atomic_config['num_heads'] = [8, 8, 8]
-        # 原子编码器没有PMA池化层，因此num_inds和linear_output_size无效
-        atomic_config.pop('num_inds', None)
-        atomic_config.pop('linear_output_size', None)
+        # 虽然原子编码器不使用PMA，但Estimator的__init__需要这些参数
+        # 我们保留它们，但它们在原子编码阶段不会被实际使用
+        # atomic_config.pop('num_inds', None)
+        # atomic_config.pop('linear_output_size', None)
         atomic_config['num_features'] = feature_dims['node_dim']
         atomic_config['edge_dim'] = feature_dims['edge_dim']
         atomic_config['set_max_items'] = esa_config['atomic_set_max_items']
