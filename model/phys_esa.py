@@ -81,14 +81,17 @@ class PhysESA(pl.LightningModule):
         执行多尺度前向传播。
         """
         # --- 1. 原子级别编码 ---
-        # Estimator的forward返回的是处理后的边表示（在被to_dense_batch之前）
-        # 我们需要修改Estimator来返回这个中间结果
-        atomic_edge_embeds, atomic_edge_batch_map = self.atomic_encoder(batch, return_embeds=True)
+        # --- 1. 原子级别编码 ---
+        atomic_edge_embeds, _ = self.atomic_encoder(batch, return_embeds=True)
 
         # --- 2. 从原子到粗粒度的池化 ---
-        # 使用scatter_sum将原子级别的边表示聚合到粗粒度节点上
-        # 注意：这里我们是把“边”的表示聚合为“节点”的表示
-        coarse_node_features = scatter_sum(atomic_edge_embeds, atomic_edge_batch_map, dim=0)
+        # --- 2a. 边 -> 原子: 将更新后的边特征聚合回原子上 ---
+        source_nodes = batch.edge_index[0]
+        num_atomic_nodes = batch.num_nodes
+        updated_atomic_node_features = scatter_sum(atomic_edge_embeds, source_nodes, dim=0, dim_size=num_atomic_nodes)
+
+        # --- 2b. 原子 -> 粗粒度节点: 将更新后的原子特征池化到粗粒度图 ---
+        coarse_node_features = scatter_sum(updated_atomic_node_features, batch.atom_to_coarse_idx, dim=0)
         
         # 确保池化后的节点数与粗粒度图的节点数一致
         num_expected_coarse_nodes = batch.coarse_pos.shape[0]
