@@ -80,6 +80,9 @@ class MultiScaleCollater:
         batch_data.coarse_max_node_global = torch.tensor([self.coarse_max_nodes], dtype=torch.long)
         batch_data.coarse_max_edge_global = torch.tensor([self.coarse_max_edges], dtype=torch.long)
         
+        # 附加总的粗粒度节点数，用于scatter的dim_size
+        batch_data.num_coarse_nodes = coarse_node_offset
+
         return batch_data
 
 def main():
