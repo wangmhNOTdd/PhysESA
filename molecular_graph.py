@@ -247,7 +247,7 @@ class MultiScaleGraphBuilder:
         dist_matrix = torch.cdist(protein_pos, ligand_pos)
         min_dist_to_ligand, _ = torch.min(dist_matrix, dim=1)
         
-        interface_atom_mask = min_dist_to_ligand <= self.interface_cutoff
+        interface_atom_mask = (min_dist_to_ligand <= self.interface_cutoff).numpy()
         interface_residues = protein_df_full.loc[interface_atom_mask, 'res_id']
         interface_res_ids = interface_residues.unique()
         
