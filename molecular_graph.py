@@ -5,6 +5,7 @@ from Bio import PDB
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from torch_geometric.data import Data
+from torch.nn import functional as F
 import json
 import os
 from typing import Tuple, Dict, List, Optional
@@ -133,41 +134,52 @@ class MultiScaleGraphBuilder:
         onehot[idx] = 1.0
         return onehot
 
-    def get_atom_features(self, all_atoms_df: pd.DataFrame, protein_mol: Chem.Mol, ligand_mol: Chem.Mol) -> torch.Tensor:
-        """提取完整的原子物理化学特征。"""
-        AllChem.ComputeGasteigerCharges(protein_mol)
+    def get_simplified_protein_features(self, protein_df: pd.DataFrame) -> pd.DataFrame:
+        """为蛋白质原子生成简化的、不依赖RDKit的特征。"""
+        # 特征作为新的列添加到DataFrame中，以便后续处理
+        
+        # 1. 原子类型 (10维)
+        elements = ['C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'Other']
+        atom_type_map = {elem: i for i, elem in enumerate(elements)}
+        protein_df['atom_type_idx'] = protein_df['element'].map(lambda x: atom_type_map.get(x, atom_type_map['Other']))
+
+        # 2. 残基类型 (21维)
+        residue_types = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE',
+                         'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'TRP', 'TYR', 'THR', 'VAL', 'UNK']
+        res_map = {res: i for i, res in enumerate(residue_types)}
+        protein_df['res_type_idx'] = protein_df['res_id'].map(lambda x: res_map.get(x.split('_')[1], res_map['UNK']))
+        
+        # Gasteiger电荷的粗略估计（对于边特征）
+        protein_df['gasteiger_charge'] = 0.0 # 简化处理，设为0
+
+        return protein_df
+
+    def get_ligand_features(self, ligand_df: pd.DataFrame, ligand_mol: Chem.Mol) -> pd.DataFrame:
+        """为配体原子生成完整的RDKit化学特征，并附加到DataFrame。"""
         AllChem.ComputeGasteigerCharges(ligand_mol)
         
-        all_features = []
-        for _, row in all_atoms_df.iterrows():
-            mol = ligand_mol if row['is_ligand'] else protein_mol
-            atom = mol.GetAtomWithIdx(int(row['atom_idx_rdkit']))
+        features_list = []
+        for _, row in ligand_df.iterrows():
+            atom = ligand_mol.GetAtomWithIdx(int(row['atom_idx_rdkit']))
             
-            atom_type_oh = self.get_atom_type_onehot(atom.GetSymbol())
-            formal_charge = float(atom.GetFormalCharge())
+            features = {
+                'formal_charge': float(atom.GetFormalCharge()),
+                'is_aromatic': float(atom.GetIsAromatic()),
+                'heavy_neighbors': float(sum(1 for n in atom.GetNeighbors() if n.GetSymbol() != 'H')),
+                'total_hydrogens': float(atom.GetTotalNumHs())
+            }
             
             hybridization = str(atom.GetHybridization())
-            hybrid_oh = np.zeros(len(self.hybridization_types))
-            if hybridization in self.hybridization_types:
-                hybrid_oh[self.hybridization_types.index(hybridization)] = 1.0
-            else:
-                hybrid_oh[-1] = 1.0
-            
-            is_aromatic = float(atom.GetIsAromatic())
-            heavy_neighbors = float(sum(1 for n in atom.GetNeighbors() if n.GetSymbol() != 'H'))
-            total_hydrogens = float(atom.GetTotalNumHs())
+            for h_type in self.hybridization_types:
+                features[f'hybrid_{h_type}'] = 1.0 if hybridization == h_type else 0.0
             
             gasteiger_charge = float(atom.GetProp('_GasteigerCharge'))
-            if not np.isfinite(gasteiger_charge): gasteiger_charge = 0.0
-            all_atoms_df.at[row.name, 'gasteiger_charge'] = gasteiger_charge
-
-            features = np.concatenate([
-                atom_type_oh, [formal_charge], hybrid_oh,
-                [is_aromatic], [heavy_neighbors], [total_hydrogens]
-            ])
-            all_features.append(features)
+            features['gasteiger_charge'] = gasteiger_charge if np.isfinite(gasteiger_charge) else 0.0
             
-        return torch.tensor(np.array(all_features), dtype=torch.float32)
+            features_list.append(features)
+            
+        ligand_features_df = pd.DataFrame(features_list, index=ligand_df.index)
+        return pd.concat([ligand_df, ligand_features_df], axis=1)
 
     def gaussian_basis_functions(self, distances: torch.Tensor) -> torch.Tensor:
         """使用高斯基函数扩展距离特征。"""
@@ -207,69 +219,48 @@ class MultiScaleGraphBuilder:
         
         return torch.cat([dist_features, direction_vectors, charge_product], dim=1)
 
-    def _create_protein_mol_from_df(self, pdb_file: str, protein_df: pd.DataFrame) -> Optional[Chem.Mol]:
-        """从DataFrame动态创建只包含界面原子的RDKit Mol对象。"""
-        interface_atom_serials = set(protein_df['atom_serial_number'])
-        pdb_lines = []
-        with open(pdb_file, 'r') as f:
-            for line in f:
-                if line.startswith("ATOM") or line.startswith("HETATM"):
-                    try:
-                        if int(line[6:11]) in interface_atom_serials:
-                            pdb_lines.append(line)
-                    except ValueError:
-                        continue
-        
-        if not pdb_lines: return None
-        
-        pdb_block = "".join(pdb_lines)
-        mol = Chem.MolFromPDBBlock(pdb_block, sanitize=True, removeHs=False)
-        if mol is None: return None
-        
-        try:
-            mol = Chem.AddHs(mol, addCoords=True)
-        except Exception:
-            pass # 忽略加氢失败
-        
-        return mol
-
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
         """构建包含多尺度信息的图对象。"""
         # 1. 解析分子
         protein_df_full = self.parse_protein_with_biopython(pdb_file)
-        ligand_df, ligand_mol = self.parse_sdf_ligand(sdf_file)
-        if protein_df_full is None or ligand_df is None or ligand_mol is None: return None
+        ligand_df_raw, ligand_mol = self.parse_sdf_ligand(sdf_file)
+        if protein_df_full is None or ligand_df_raw is None or ligand_mol is None: return None
 
         # 2. 定义界面
         protein_pos = torch.tensor(protein_df_full[['x', 'y', 'z']].values, dtype=torch.float32)
-        ligand_pos = torch.tensor(ligand_df[['x', 'y', 'z']].values, dtype=torch.float32)
+        ligand_pos = torch.tensor(ligand_df_raw[['x', 'y', 'z']].values, dtype=torch.float32)
 
         dist_matrix = torch.cdist(protein_pos, ligand_pos)
         min_dist_to_ligand, _ = torch.min(dist_matrix, dim=1)
         
         interface_atom_mask = (min_dist_to_ligand <= self.interface_cutoff).numpy()
         interface_residues = protein_df_full.loc[interface_atom_mask, 'res_id']
+        if interface_residues.empty: return None
         interface_res_ids = interface_residues.unique()
         
-        protein_df = protein_df_full[protein_df_full['res_id'].isin(interface_res_ids)]
+        protein_df = protein_df_full[protein_df_full['res_id'].isin(interface_res_ids)].copy()
         if protein_df.empty: return None
-
-        # 动态创建只包含界面原子的蛋白质Mol对象，用于特征提取
-        protein_mol = self._create_protein_mol_from_df(pdb_file, protein_df)
-        if protein_mol is None: return None
 
         # 3. 准备细粒度图（原子图）
-        # 为RDKit特征提取准备原子索引映射
-        protein_rdkit_map = {a.GetPDBResidueInfo().GetSerialNumber(): a.GetIdx() for a in protein_mol.GetAtoms() if a.GetPDBResidueInfo()}
-        protein_df['atom_idx_rdkit'] = protein_df['atom_serial_number'].map(protein_rdkit_map)
-        ligand_df['atom_idx_rdkit'] = ligand_df.index
-
-        protein_df.dropna(subset=['atom_idx_rdkit'], inplace=True)
-        if protein_df.empty: return None
-
+        protein_df = self.get_simplified_protein_features(protein_df)
+        ligand_df = self.get_ligand_features(ligand_df_raw, ligand_mol)
+        
+        # 合并DataFrame并创建最终的特征张量
         atom_df = pd.concat([protein_df, ligand_df], ignore_index=True).reset_index(drop=True)
+        atom_df.fillna(0, inplace=True) # 用0填充所有NaN
+
+        # One-hot编码
+        atom_type_oh = F.one_hot(torch.tensor(atom_df['atom_type_idx'].values, dtype=torch.long), num_classes=10)
+        res_type_oh = F.one_hot(torch.tensor(atom_df['res_type_idx'].values, dtype=torch.long), num_classes=21)
+        
+        # 数值特征
+        numeric_features = torch.tensor(atom_df[[
+            'formal_charge', 'is_aromatic', 'heavy_neighbors', 'total_hydrogens',
+            'hybrid_SP', 'hybrid_SP2', 'hybrid_SP3', 'hybrid_SP3D', 'hybrid_SP3D2', 'hybrid_UNSPECIFIED'
+        ]].values, dtype=torch.float32)
+
+        atom_features = torch.cat([atom_type_oh, res_type_oh, numeric_features], dim=1)
         atom_pos = torch.tensor(atom_df[['x', 'y', 'z']].values, dtype=torch.float32)
-        atom_features = self.get_atom_features(atom_df, protein_mol, ligand_mol)
         atom_edge_index = self.build_edges(atom_pos)
         if atom_edge_index.shape[1] == 0: return None
         atom_edge_features = self.get_full_edge_features(atom_edge_index, atom_pos, atom_df)
@@ -342,8 +333,10 @@ class MultiScaleGraphBuilder:
 
     def get_feature_dimensions(self) -> Dict[str, int]:
         """返回特征维度信息。"""
+        # Atom type (10) + Res type (21) + Numeric (10)
+        node_dim = 10 + 21 + 10
         return {
-            'node_dim': self.atom_feature_dim,
+            'node_dim': node_dim,
             'edge_dim': self.edge_feature_dim,
             'pos_dim': 3
         }
