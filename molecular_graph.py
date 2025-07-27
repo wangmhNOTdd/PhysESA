@@ -329,6 +329,10 @@ class MultiScaleGraphBuilder:
                 print(f"[错误] 跳过 {complex_id}: 数据字段 '{key}' 包含无效值。")
                 return None
         
+        if data.num_coarse_nodes == 0:
+            print(f"[警告] 跳过 {complex_id}: 粗粒度图没有节点。")
+            return None
+
         return data
 
     def get_feature_dimensions(self) -> Dict[str, int]:
