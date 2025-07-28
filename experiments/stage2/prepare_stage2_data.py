@@ -44,7 +44,7 @@ def process_complex_list(
         if 'affinities' in metadata and complex_id in metadata['affinities']:
             affinity = float(metadata['affinities'][complex_id])
         else:
-            # print(f"跳过 {complex_id}: 缺少亲和力数据")
+            print(f"跳过 {complex_id}: 缺少亲和力数据")
             continue
             
         try:
