@@ -162,9 +162,9 @@ def main():
 
         # --- 粗粒度编码器特定配置 ---
         'coarse_encoder_config': {
-            'layer_types': ['M', 'S', 'P', 'S'],
-            'hidden_dims': [128, 128, 128, 128],
-            'num_heads': [8, 8, 8, 8],
+            'layer_types': ['M', 'M', 'S', 'P', 'S'],
+            'hidden_dims': [128, 128, 128, 128, 128],
+            'num_heads': [8, 8, 8, 8, 8],
             'set_max_items': 0, # 将被动态设置
         }
     }
