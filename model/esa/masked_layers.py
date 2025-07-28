@@ -794,10 +794,10 @@ class Estimator(nn.Module):
         """
         x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
         
-        # --- 边界情况处理：图中没有边 ---
+        # --- 边界情况处理：图中没有边 (最终修复) ---
         if edge_index is None or edge_index.shape[1] == 0:
-            batch_size = torch.max(batch_mapping).item() + 1
-            return torch.zeros(batch_size, device=x.device, dtype=x.dtype)
+            # 使用 batch.num_graphs 来安全地获取批次大小
+            return torch.zeros(batch.num_graphs, device=x.device, dtype=x.dtype)
 
         # 兼容不同版本的max_items获取方式
         if hasattr(batch, 'max_edge_global'):
@@ -827,11 +827,6 @@ class Estimator(nn.Module):
             return h, edge_batch_index
 
         # 3. Convert to dense batch for the attention mechanism
-        if edge_batch_index.numel() == 0:
-            # 如果批次中没有边，无法进行密集化，直接返回零预测
-            batch_size = torch.max(batch_mapping).item() + 1
-            return torch.zeros(batch_size, device=x.device, dtype=x.dtype)
-
         h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
         # 4. Pass through the core ESA model
