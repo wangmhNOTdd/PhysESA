@@ -21,17 +21,20 @@ class PhysESA(pl.LightningModule):
     1. 一个在原子图上操作的编码器 (atomic_encoder)。
     2. 一个在粗粒度图（残基/官能团）上操作的编码器+池化层 (coarse_encoder)。
     """
-    def __init__(self, esa_config: dict, training_config: dict, feature_dims: dict):
+    def __init__(self, esa_config: dict, feature_dims: dict, learning_rate: float, weight_decay: float):
         """
         Args:
             esa_config (dict): 包含两个尺度模型配置的字典。
-            training_config (dict): 训练配置。
             feature_dims (dict): 从metadata.json加载的特征维度。
+            learning_rate (float): 优化器的学习率。
+            weight_decay (float): 优化器的权重衰减。
         """
         super().__init__()
         self.save_hyperparameters()
 
-        self.training_config = training_config
+        # 保存优化器所需的参数
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
         
         # --- 原子级别编码器配置 ---
         atomic_config = copy.deepcopy(esa_config)
@@ -220,8 +223,8 @@ class PhysESA(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
-            lr=self.training_config['learning_rate'],
-            weight_decay=self.training_config['weight_decay']
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,

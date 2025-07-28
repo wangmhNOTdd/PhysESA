@@ -204,11 +204,28 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
     test_loader = DataLoader(test_dataset, batch_size=training_config['batch_size'], shuffle=False, num_workers=training_config['num_workers'], collate_fn=collater)
 
-    # --- 3. 初始化模型 ---
+    # --- 3. 打印最终配置并初始化模型 ---
+    print("\n" + "="*50)
+    print(" " * 15 + "FINAL CONFIGURATIONS")
+    print("="*50)
+    print("\n[Training Configuration]")
+    for key, value in training_config.items():
+        print(f"  - {key:<20}: {value}")
+    
+    print("\n[ESA Configuration]")
+    for key, value in esa_config.items():
+        # 避免打印过长的列表
+        if isinstance(value, list) and len(value) > 5:
+            print(f"  - {key:<20}: [{value[0]}, {value[1]}, ... , {value[-1]}] (len={len(value)})")
+        else:
+            print(f"  - {key:<20}: {value}")
+    print("="*50 + "\n")
+
     model = PhysESA(
         esa_config=esa_config,
-        training_config=training_config,
-        feature_dims=feature_dims
+        feature_dims=feature_dims,
+        learning_rate=training_config['learning_rate'],
+        weight_decay=training_config['weight_decay']
     )
 
     # --- 4. 设置训练器 ---
