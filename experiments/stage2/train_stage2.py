@@ -59,18 +59,24 @@ class MultiScaleCollater:
 
         # 2. 手动处理自定义图属性的批次偏移
         coarse_node_offset = 0
-        coarse_edge_offset = 0
+        new_coarse_edge_indices = []
         
         for i, data in enumerate(batch):
             # 偏移 atom_to_coarse_idx
             batch_data.atom_to_coarse_idx[batch_data.ptr[i]:batch_data.ptr[i+1]] += coarse_node_offset
             
-            # 偏移 coarse_edge_index
-            num_coarse_edges = data.coarse_edge_index.shape[1]
-            batch_data.coarse_edge_index[:, coarse_edge_offset:coarse_edge_offset + num_coarse_edges] += coarse_node_offset
+            # 手动偏移并收集 coarse_edge_index
+            if data.coarse_edge_index.numel() > 0:
+                new_coarse_edge_indices.append(data.coarse_edge_index + coarse_node_offset)
             
             coarse_node_offset += data.num_coarse_nodes
-            coarse_edge_offset += num_coarse_edges
+
+        # 拼接所有偏移后的 coarse_edge_index
+        if new_coarse_edge_indices:
+            batch_data.coarse_edge_index = torch.cat(new_coarse_edge_indices, dim=1)
+        else:
+            # 如果整个批次都没有粗粒度边
+            batch_data.coarse_edge_index = torch.empty((2, 0), dtype=torch.long)
 
         # 3. 为粗粒度图创建batch和ptr (现在可以安全地创建了)
         coarse_num_nodes_list = [data.num_coarse_nodes for data in batch]
