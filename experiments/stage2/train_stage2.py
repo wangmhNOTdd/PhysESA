@@ -50,7 +50,6 @@ class MultiScaleCollater:
         self.coarse_max_edges = coarse_max_edges
 
     def __call__(self, batch: List[Any]) -> Batch:
-        print(f"[DEBUG Collater] Received batch with {len(batch)} samples.")
         if not batch:
             return None # 如果批次为空，直接返回
 
