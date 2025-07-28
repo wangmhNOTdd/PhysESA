@@ -80,9 +80,6 @@ class PhysESA(pl.LightningModule):
         """
         执行多尺度前向传播。
         """
-        print(f"[DEBUG PhysESA] Batch received. Batch keys: {batch.keys}")
-        print(f"[DEBUG PhysESA] coarse_batch tensor: {batch.coarse_batch}")
-        print(f"[DEBUG PhysESA] num_coarse_nodes: {batch.num_coarse_nodes}")
 
         # --- 1. 原子级别编码 ---
         # --- 1. 原子级别编码 ---
@@ -125,15 +122,6 @@ class PhysESA(pl.LightningModule):
         )
 
         # --- 4. 粗粒度级别编码和预测 ---
-        print("\n--- [DEBUG] Coarse Batch Details Before Encoder ---")
-        print(f"  - coarse_batch.num_graphs: {coarse_batch.num_graphs}")
-        print(f"  - coarse_batch.num_nodes: {coarse_batch.num_nodes}")
-        print(f"  - coarse_batch.x.shape: {coarse_batch.x.shape}")
-        print(f"  - coarse_batch.edge_index.shape: {coarse_batch.edge_index.shape}")
-        print(f"  - coarse_batch.batch.shape: {coarse_batch.batch.shape}")
-        if coarse_batch.batch.numel() > 0:
-            print(f"  - coarse_batch.batch max value: {coarse_batch.batch.max().item()}")
-        print("---------------------------------------------------\n")
 
         predictions = self.coarse_encoder(coarse_batch)
         

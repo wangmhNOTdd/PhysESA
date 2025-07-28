@@ -832,16 +832,6 @@ class Estimator(nn.Module):
             batch_size = torch.max(batch_mapping).item() + 1
             return torch.zeros(batch_size, device=x.device, dtype=x.dtype)
 
-        print("\n--- [DEBUG] Details Before to_dense_batch ---")
-        print(f"  - h.shape: {h.shape}")
-        print(f"  - edge_batch_index.shape: {edge_batch_index.shape}")
-        if edge_batch_index.numel() > 0:
-            print(f"  - edge_batch_index min: {edge_batch_index.min().item()}, max: {edge_batch_index.max().item()}")
-        else:
-            print("  - edge_batch_index is empty!")
-        print(f"  - num_max_items: {num_max_items}")
-        print("---------------------------------------------------\n")
-
         h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
         # 4. Pass through the core ESA model
