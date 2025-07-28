@@ -51,6 +51,8 @@ class PhysESA(pl.LightningModule):
         
         self.atomic_encoder = Estimator(**atomic_config)
 
+        print(f"--- Pooling atomic features ({atomic_config['graph_dim']}D) to coarse-grained nodes ---")
+
         # --- 粗粒度级别编码器配置 ---
         coarse_config = copy.deepcopy(esa_config)
         coarse_config['layer_types'] = ['M', 'S', 'P', 'S']
