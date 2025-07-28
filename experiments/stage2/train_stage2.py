@@ -281,10 +281,9 @@ def main():
         trainer.fit(model, train_loader, val_loader)
         print(f"训练完成！模型和日志保存在: {args.output_dir}")
         
-        # 增加一个短暂延时，确保logger有时间写入文件
-        import time
-        print("等待日志文件写入...")
-        time.sleep(2)
+        # 显式地终结logger，确保所有日志都被写入文件
+        if trainer.logger:
+            trainer.logger.finalize('success')
         
         # 在训练结束后，使用最佳模型进行测试
         best_model_path = checkpoint_callback.best_model_path
