@@ -131,17 +131,12 @@ def main():
     
     # 默认ESA模型配置
     esa_config = {
-        # --- Estimator's MLP parameters ---
+        # --- 通用参数 ---
         'graph_dim': 128,
-        # --- ESA model parameters ---
-        'hidden_dims': [128, 128, 128, 128, 128, 128, 128, 128],
-        'num_heads': [8, 8, 8, 8, 8, 8, 8, 8],
-        'layer_types': ['M', 'M', 'S', 'M', 'M', 'S', 'P', 'S'],
         'num_inds': 32,
-        'set_max_items': 0, # This will be set dynamically later
         'linear_output_size': 1,
-        'use_fp16': True, # Corresponds to training_config
-        'node_or_edge': "edge", # Renamed from apply_attention_on
+        'use_fp16': True,
+        'node_or_edge': "edge",
         'xformers_or_torch_attn': "xformers",
         'pre_or_post': "pre",
         'norm_type': "LN",
@@ -151,11 +146,27 @@ def main():
         'residual_dropout': 0.0,
         'pma_residual_dropout': 0.0,
         'use_mlps': True,
-        'mlp_hidden_size': 128, # A sensible default
+        'mlp_hidden_size': 128,
         'num_mlp_layers': 2,
         'mlp_type': "gated_mlp",
-        'mlp_dropout': 0.1, # A sensible default
+        'mlp_dropout': 0.1,
         'use_mlp_ln': False,
+
+        # --- 原子编码器特定配置 ---
+        'atomic_encoder_config': {
+            'layer_types': ['M', 'M', 'S'],
+            'hidden_dims': [128, 128, 128],
+            'num_heads': [8, 8, 8],
+            'set_max_items': 0, # 将被动态设置
+        },
+
+        # --- 粗粒度编码器特定配置 ---
+        'coarse_encoder_config': {
+            'layer_types': ['M', 'S', 'P', 'S'],
+            'hidden_dims': [128, 128, 128, 128],
+            'num_heads': [8, 8, 8, 8],
+            'set_max_items': 0, # 将被动态设置
+        }
     }
 
     # --- 2. 准备数据加载器 ---
@@ -190,8 +201,8 @@ def main():
     final_max_coarse_edges = nearest_multiple_of_8(raw_max_coarse_edges + 1)
 
     # 为两个尺度的模型设置填充大小
-    esa_config['atomic_set_max_items'] = raw_max_atomic_edges
-    esa_config['coarse_set_max_items'] = raw_max_coarse_edges
+    esa_config['atomic_encoder_config']['set_max_items'] = raw_max_atomic_edges
+    esa_config['coarse_encoder_config']['set_max_items'] = raw_max_coarse_edges
     
     collater = MultiScaleCollater(
         atomic_max_nodes=final_max_atomic_nodes,

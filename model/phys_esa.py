@@ -36,37 +36,24 @@ class PhysESA(pl.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         
-        # --- 原子级别编码器配置 ---
-        atomic_config = copy.deepcopy(esa_config)
-        atomic_config['layer_types'] = ['M', 'M', 'S']
-        atomic_config['hidden_dims'] = [128, 128, 128]
-        atomic_config['num_heads'] = [8, 8, 8]
-        # 虽然原子编码器不使用PMA，但Estimator的__init__需要这些参数
-        # 我们保留它们，但它们在原子编码阶段不会被实际使用
-        # atomic_config.pop('num_inds', None)
-        # atomic_config.pop('linear_output_size', None)
+        # --- 从esa_config中分离出通用配置和特定配置 ---
+        common_config = {k: v for k, v in esa_config.items() if k not in ['atomic_encoder_config', 'coarse_encoder_config']}
+        atomic_specific_config = esa_config['atomic_encoder_config']
+        coarse_specific_config = esa_config['coarse_encoder_config']
+
+        # --- 构建原子级别编码器配置 ---
+        atomic_config = {**common_config, **atomic_specific_config}
         atomic_config['num_features'] = feature_dims['node_dim']
         atomic_config['edge_dim'] = feature_dims['edge_dim']
-        atomic_config['set_max_items'] = esa_config['atomic_set_max_items']
-        # 清理临时的键
-        atomic_config.pop('atomic_set_max_items', None)
-        atomic_config.pop('coarse_set_max_items', None)
         
         self.atomic_encoder = Estimator(**atomic_config)
 
         print(f"--- Pooling atomic features ({atomic_config['graph_dim']}D) to coarse-grained nodes ---")
 
-        # --- 粗粒度级别编码器配置 ---
-        coarse_config = copy.deepcopy(esa_config)
-        coarse_config['layer_types'] = ['M', 'S', 'P', 'S']
-        coarse_config['hidden_dims'] = [128, 128, 128, 128]
-        coarse_config['num_heads'] = [8, 8, 8, 8]
-        coarse_config['num_features'] = atomic_config['graph_dim']
-        coarse_config['edge_dim'] = 0
-        coarse_config['set_max_items'] = esa_config['coarse_set_max_items']
-        # 清理临时的键
-        coarse_config.pop('atomic_set_max_items', None)
-        coarse_config.pop('coarse_set_max_items', None)
+        # --- 构建粗粒度级别编码器配置 ---
+        coarse_config = {**common_config, **coarse_specific_config}
+        coarse_config['num_features'] = atomic_config['graph_dim'] # 输入特征是原子编码器的输出维度
+        coarse_config['edge_dim'] = 0 # 粗粒度图没有边特征
         
         self.coarse_encoder = Estimator(**coarse_config)
 
