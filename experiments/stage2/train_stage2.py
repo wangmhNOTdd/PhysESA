@@ -122,10 +122,10 @@ def main():
         'weight_decay': 1e-5,
         'lr_patience': 10,
         'batch_size': 8,
-        'max_epochs': 30,
+        'max_epochs': 40,
         'patience': 15,
         'grad_clip': 1.0,
-        'use_fp16': False,
+        'use_fp16': True,
         'num_workers': 8
     }
     
@@ -134,13 +134,13 @@ def main():
         # --- Estimator's MLP parameters ---
         'graph_dim': 128,
         # --- ESA model parameters ---
-        'hidden_dims': [128, 128, 128, 128, 128, 128, 128],
-        'num_heads': [8, 8, 8, 8, 8, 8, 8],
-        'layer_types': ['M', 'M', 'S', 'M', 'S', 'P', 'S'],
+        'hidden_dims': [128, 128, 128, 128, 128, 128, 128, 128],
+        'num_heads': [8, 8, 8, 8, 8, 8, 8, 8],
+        'layer_types': ['M', 'M', 'S', 'M', 'M', 'S', 'P', 'S'],
         'num_inds': 32,
         'set_max_items': 0, # This will be set dynamically later
         'linear_output_size': 1,
-        'use_fp16': False, # Corresponds to training_config
+        'use_fp16': True, # Corresponds to training_config
         'node_or_edge': "edge", # Renamed from apply_attention_on
         'xformers_or_torch_attn': "xformers",
         'pre_or_post': "pre",
@@ -253,6 +253,11 @@ def main():
         trainer.fit(model, train_loader, val_loader)
         print(f"训练完成！模型和日志保存在: {args.output_dir}")
         
+        # 增加一个短暂延时，确保logger有时间写入文件
+        import time
+        print("等待日志文件写入...")
+        time.sleep(2)
+        
         # 在训练结束后，使用最佳模型进行测试
         best_model_path = checkpoint_callback.best_model_path
         if best_model_path and os.path.exists(best_model_path):
@@ -309,10 +314,9 @@ def plot_training_results(log_dir: str):
     # 找到并标注最佳epoch
     # 找到并标注最佳epoch
     if 'val_loss' in epoch_metrics.columns and not epoch_metrics['val_loss'].isnull().all():
-        best_epoch_idx = epoch_metrics['val_loss'].idxmin()
-        # 最终修复：通过.values[0]获取底层的numpy值，然后转换为原生Python类型
-        best_epoch = int(epoch_metrics.loc[best_epoch_idx:best_epoch_idx, 'epoch'].values[0])
-        best_val_loss = float(epoch_metrics.loc[best_epoch_idx:best_epoch_idx, 'val_loss'].values[0])
+        best_epoch_row = epoch_metrics.loc[epoch_metrics['val_loss'].idxmin()]
+        best_epoch = int(best_epoch_row['epoch'])
+        best_val_loss = float(best_epoch_row['val_loss'])
         
         # 标注损失图
         ax.axvline(x=best_epoch, color='red', linestyle='--', linewidth=1.5, label=f'Best Epoch: {best_epoch}')
@@ -330,7 +334,7 @@ def plot_training_results(log_dir: str):
             ax.set_ylabel('Score', fontsize=12)
             
             # 在其他指标图上也标注最佳epoch的位置
-            best_metric_val = float(epoch_metrics.loc[best_epoch_idx:best_epoch_idx, metric].values[0])
+            best_metric_val = float(best_epoch_row[metric])
             ax.axvline(x=best_epoch, color='red', linestyle='--', linewidth=1.5)
             ax.scatter(x=best_epoch, y=best_metric_val, marker='*', s=200, color='red', zorder=5, label=f'Value at Best Epoch: {best_metric_val:.4f}')
             ax.legend()
