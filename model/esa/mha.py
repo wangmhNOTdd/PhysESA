@@ -1,4 +1,5 @@
 import torch
+import math
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.init import xavier_uniform_, constant_, xavier_normal_
@@ -45,7 +46,7 @@ class MAB(nn.Module):
         # self.ln_k = nn.LayerNorm(dim_K, eps=1e-8)
 
 
-    def forward(self, Q, K, adj_mask=None):
+    def forward(self, Q, K, adj_mask=None, return_attention=False):
         batch_size = Q.size(0)
         E_total = self.dim_V
         assert E_total % self.num_heads == 0, "Embedding dim is not divisible by nheads"
@@ -63,7 +64,7 @@ class MAB(nn.Module):
         K = K.view(batch_size, -1, self.num_heads, head_dim)
         V = V.view(batch_size, -1, self.num_heads, head_dim)
 
-        if self.xformers_or_torch_attn in ["torch"]:
+        if self.xformers_or_torch_attn in ["torch"] or return_attention:
             Q = Q.transpose(1, 2)
             K = K.transpose(1, 2)
             V = V.transpose(1, 2)
@@ -71,6 +72,24 @@ class MAB(nn.Module):
 
         if adj_mask is not None:
             adj_mask = adj_mask.expand(-1, self.num_heads, -1, -1)
+
+        if return_attention:
+            # Slower path for visualization that returns attention weights
+            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(head_dim)
+            if adj_mask is not None:
+                attn_scores = attn_scores.masked_fill(adj_mask, -1e9)
+            
+            attn_weights = F.softmax(attn_scores, dim=-1)
+
+            if self.training:
+                attn_weights_for_out = F.dropout(attn_weights, p=self.dropout_p)
+            else:
+                attn_weights_for_out = attn_weights
+
+            out = torch.matmul(attn_weights_for_out, V)
+            out = out.transpose(1, 2).reshape(batch_size, -1, self.num_heads * head_dim)
+            out = out + F.mish(self.fc_o(out))
+            return out, attn_weights
 
         if self.xformers_or_torch_attn == "xformers":
             out = memory_efficient_attention(Q, K, V, attn_bias=adj_mask, p=self.dropout_p if self.training else 0)
@@ -82,6 +101,8 @@ class MAB(nn.Module):
                     Q, K, V, attn_mask=adj_mask, dropout_p=self.dropout_p if self.training else 0, is_causal=False
                 )
             out = out.transpose(1, 2).reshape(batch_size, -1, self.num_heads * head_dim)
+        else:
+            raise ValueError(f"Unknown attention backend: {self.xformers_or_torch_attn}")
 
 
         out = out + F.mish(self.fc_o(out))
@@ -94,8 +115,8 @@ class SAB(nn.Module):
         super(SAB, self).__init__()
         self.mab = MAB(dim_in, dim_in, dim_out, num_heads, dropout, xformers_or_torch_attn)
 
-    def forward(self, X, adj_mask=None):
-        return self.mab(X, X, adj_mask=adj_mask)
+    def forward(self, X, adj_mask=None, return_attention=False):
+        return self.mab(X, X, adj_mask=adj_mask, return_attention=return_attention)
 
 
 class PMA(nn.Module):
@@ -105,5 +126,5 @@ class PMA(nn.Module):
         nn.init.xavier_normal_(self.S)
         self.mab = MAB(dim, dim, dim, num_heads, dropout_p=dropout, xformers_or_torch_attn=xformers_or_torch_attn)
 
-    def forward(self, X, adj_mask=None):
-        return self.mab(self.S.repeat(X.size(0), 1, 1), X, adj_mask=adj_mask)
+    def forward(self, X, adj_mask=None, return_attention=False):
+        return self.mab(self.S.repeat(X.size(0), 1, 1), X, adj_mask=adj_mask, return_attention=return_attention)

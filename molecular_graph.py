@@ -315,6 +315,9 @@ class MultiScaleGraphBuilder:
         coarse_edge_index = self.build_edges(coarse_pos) # 在粗粒度节点质心上建边
 
         # 5. 整合到Data对象
+        # 创建从粗粒度索引到ID的逆映射，用于可视化
+        idx_to_coarse_id_map = {v: k for k, v in coarse_node_map.items()}
+        
         data = Data(
             x=atom_features,
             edge_index=atom_edge_index,
@@ -327,7 +330,8 @@ class MultiScaleGraphBuilder:
             atom_to_coarse_idx=atom_to_coarse_idx,
             coarse_pos=coarse_pos,
             coarse_edge_index=coarse_edge_index,
-            num_coarse_nodes=num_coarse_nodes
+            num_coarse_nodes=num_coarse_nodes,
+            coarse_node_id_map=idx_to_coarse_id_map # 新增，用于可视化
         )
 
         # 最终检查

@@ -78,7 +78,7 @@ def get_first_unique_index(t):
     _, ind_sorted = torch.sort(idx, stable=True)
     cum_sum = counts.cumsum(0)
 
-    zero = torch.tensor([0], device=torch.device("cuda:0"))
+    zero = torch.tensor([0], device=t.device)
     cum_sum = torch.cat((zero, cum_sum[:-1]))
     first_indicies = ind_sorted[cum_sum]
 
@@ -90,15 +90,15 @@ def generate_consecutive_tensor(input_tensor, final):
     lengths = input_tensor[1:] - input_tensor[:-1]
 
     # Append the final length
-    lengths = torch.cat((lengths, torch.tensor([final - input_tensor[-1]], device=torch.device("cuda:0"))))
+    lengths = torch.cat((lengths, torch.tensor([final - input_tensor[-1]], device=input_tensor.device)))
 
     # Create ranges for each segment
-    ranges = [torch.arange(0, length, device=torch.device("cuda:0")) for length in lengths]
+    ranges = [torch.arange(0, length.item(), device=input_tensor.device) for length in lengths]
 
     # Concatenate all ranges into a single tensor
-    result = torch.cat(ranges)
-
-    return result
+    if not ranges:
+        return torch.empty(0, dtype=torch.long, device=input_tensor.device)
+    return torch.cat(ranges)
 
 # This is needed if the standard "nonzero" method from PyTorch fails
 # This alternative is slower but allows bypassing the problem until 64-bit
@@ -300,16 +300,23 @@ class SABComplete(nn.Module):
             self.norm_mlp = BN(bn_dim)
 
 
-    def forward(self, inp):
+    def forward(self, inp, return_attention=False):
         X, edge_index, batch_mapping, max_items, adj_mask = inp
+        attn_weights = None
 
         if self.pre_or_post == "pre":
             X = self.norm(X)
 
-        if self.idx == 1:
-            out_attn = self.sab(X, adj_mask)
+        # --- Attention Block ---
+        sab_input = X
+        sab_mask = adj_mask if self.idx == 1 else None
+        
+        sab_out = self.sab(sab_input, sab_mask, return_attention=return_attention)
+        
+        if return_attention:
+            out_attn, attn_weights = sab_out
         else:
-            out_attn = self.sab(X, None)
+            out_attn = sab_out
 
         if out_attn.shape[-1] != X.shape[-1]:
             X = self.proj_1(X)
@@ -320,7 +327,7 @@ class SABComplete(nn.Module):
             out = self.residual_attn(X, out_attn)
             out = self.norm(out)
         
-        # MLP block
+        # --- MLP Block ---
         if self.use_mlp:
             mlp_input = out
             if self.pre_or_post == "pre":
@@ -337,6 +344,8 @@ class SABComplete(nn.Module):
         if self.residual_dropout > 0:
             out = F.dropout(out, p=self.residual_dropout)
 
+        if return_attention:
+            return (out, edge_index, batch_mapping, max_items, adj_mask), attn_weights
         return out, edge_index, batch_mapping, max_items, adj_mask
 
 
@@ -357,9 +366,9 @@ class PMAComplete(nn.Module):
         num_mlp_layers=3,
         pre_or_post="pre",
         num_layers_for_residual=0,
-        residual_dropout=0,
+        residual_dropout: float = 0.0,
         use_mlp_ln=False,
-        mlp_dropout=0,
+        mlp_dropout: float = 0.0,
     ):
         super(PMAComplete, self).__init__()
 
@@ -413,13 +422,19 @@ class PMAComplete(nn.Module):
             self.norm_mlp = BN(32)
 
 
-    def forward(self, inp):
+    def forward(self, inp, return_attention=False):
         X, edge_index, batch_mapping, max_items, adj_mask = inp
+        attn_weights = None
 
         if self.pre_or_post == "pre":
             X = self.norm(X)
 
-        out_attn = self.pma(X)
+        # --- Attention Block ---
+        pma_out = self.pma(X, return_attention=return_attention)
+        if return_attention:
+            out_attn, attn_weights = pma_out
+        else:
+            out_attn = pma_out
 
         if self.pre_or_post == "pre" and out_attn.shape[-2] == X.shape[-2]:
             out = X + out_attn
@@ -429,7 +444,7 @@ class PMAComplete(nn.Module):
         else:
             out = out_attn
 
-        # MLP block
+        # --- MLP Block ---
         if self.use_mlp:
             mlp_input = out
             if self.pre_or_post == "pre":
@@ -446,6 +461,8 @@ class PMAComplete(nn.Module):
         if self.residual_dropout > 0:
             out = F.dropout(out, p=self.residual_dropout)
 
+        if return_attention:
+            return (out, edge_index, batch_mapping, max_items, adj_mask), attn_weights
         return out, edge_index, batch_mapping, max_items, adj_mask
 
 
@@ -577,27 +594,27 @@ class ESA(nn.Module):
             if lt == "P":
                 pma_encountered = True
                 dim_pma = layer_in_dim
-                self.decoder = [
+                self.decoder = nn.ModuleList([
                     PMAComplete(
-                        layer_in_dim,
-                        layer_num_heads,
-                        num_outputs,
+                        dim_hidden=layer_in_dim,
+                        num_heads=layer_num_heads,
+                        num_outputs=num_outputs,
+                        norm_type=norm_type,
                         dropout=pma_dropout,
-                        residual_dropout=pma_residual_dropout,
-                        xformers_or_torch_attn=xformers_or_torch_attn,
-                        pre_or_post=pre_or_post,
                         use_mlp=use_mlps,
                         mlp_hidden_size=mlp_hidden_size,
-                        mlp_dropout=mlp_dropout,
-                        num_mlp_layers=num_mlp_layers,
-                        use_mlp_ln=use_mlp_ln,
-                        norm_type=norm_type,
                         mlp_type=mlp_type,
+                        xformers_or_torch_attn=xformers_or_torch_attn,
                         set_max_items=set_max_items,
                         use_bfloat16=use_bfloat16,
+                        num_mlp_layers=num_mlp_layers,
+                        pre_or_post=pre_or_post,
                         num_layers_for_residual=len(dim_hidden) * 2,
+                        residual_dropout=pma_residual_dropout,
+                        use_mlp_ln=use_mlp_ln,
+                        mlp_dropout=mlp_dropout,
                     )
-                ]
+                ])
 
                 print(f"Added decoder PMA ({layer_in_dim}, {layer_num_heads})")
 
@@ -643,8 +660,8 @@ class ESA(nn.Module):
             self.dim_pma = dim_pma
 
 
-    def forward(self, X, edge_index, batch_mapping, num_max_items):
-
+    def forward(self, X, edge_index, batch_mapping, num_max_items, return_attention=False):
+        attention_weights = {}
         adj_mask = None
         if self.node_or_edge == "node":
             adj_mask = get_adj_mask_from_edge_index_node(
@@ -672,36 +689,52 @@ class ESA(nn.Module):
 
             if current_size < target_size:
                 pad_amount = target_size - current_size
-                # Pad the last two dimensions (height and width of the mask)
                 padding = (0, pad_amount, 0, pad_amount)
-                
-                # Use the correct fill value for the attention backend
-                if self.xformers_or_torch_attn in ["torch"]:
-                    # This value will be inverted to True (attend) for padded tokens
-                    pad_value = False
+                if self.xformers_or_torch_attn in ["torch"] or return_attention:
+                    pad_value = True # For torch backend, mask is True for non-attending
                 else:
-                    # This is a large negative number to ensure padded tokens are ignored
                     pad_value = -99999
-                
                 adj_mask = F.pad(adj_mask, padding, "constant", value=pad_value)
 
-        # 强制转换为nn.Sequential以解决Pylance的误报
-        encoder_module = nn.Sequential(*self.encoder) if isinstance(self.encoder, list) else self.encoder
-        enc, _, _, _, _ = encoder_module((X, edge_index, batch_mapping, num_max_items, adj_mask))
+        # --- Encoder ---
+        inp = (X, edge_index, batch_mapping, num_max_items, adj_mask)
+        for i, layer in enumerate(self.encoder):
+            out = layer(inp, return_attention=return_attention)
+            if return_attention:
+                inp, attn = out
+                attention_weights[f'encoder_layer_{i}'] = attn
+            else:
+                inp = out
+        enc = inp[0]
 
         if hasattr(self, "dim_pma") and self.dim_hidden[0] != self.dim_pma:
             X = self.out_proj(X)
 
         enc = enc + X
 
+        # --- Decoder ---
         if hasattr(self, "decoder"):
-            decoder_module = nn.Sequential(*self.decoder) if isinstance(self.decoder, list) else self.decoder
-            out, _, _, _, _ = decoder_module((enc, edge_index, batch_mapping, num_max_items, adj_mask))
-            out = out.mean(dim=1)
+            inp = (enc, edge_index, batch_mapping, num_max_items, adj_mask)
+            for i, layer in enumerate(self.decoder):
+                out = layer(inp, return_attention=return_attention)
+                if return_attention:
+                    inp, attn = out
+                    attention_weights[f'decoder_layer_{i}'] = attn
+                else:
+                    inp = out
+            out = inp[0].mean(dim=1)
         else:
-            out = enc
+            # If no decoder, pool from encoder output
+            if enc.dim() > 2:
+                out = enc.mean(dim=1)
+            else:
+                out = enc
 
-        return F.mish(self.decoder_linear(out))
+        final_prediction = F.mish(self.decoder_linear(out))
+        
+        if return_attention:
+            return final_prediction, attention_weights
+        return final_prediction
 
 class Estimator(nn.Module):
     """
@@ -787,17 +820,26 @@ class Estimator(nn.Module):
             dropout_p=0.1
         )
 
-    def forward(self, batch: Batch, return_embeds: bool = False) -> torch.Tensor:
+    def forward(self, batch: Batch, return_embeds: bool = False, return_attention: bool = False):
         """
         Handles the full graph processing pipeline.
-        Can optionally return intermediate edge embeddings for multi-scale architectures.
+        Can optionally return intermediate edge embeddings for multi-scale architectures,
+        or attention weights for visualization.
         """
         x, edge_index, edge_attr, batch_mapping = batch.x, batch.edge_index, batch.edge_attr, batch.batch
         
         # --- 边界情况处理：图中没有边 ---
         if edge_index is None or edge_index.shape[1] == 0:
-            batch_size = torch.max(batch_mapping).item() + 1
-            return torch.zeros(batch_size, device=x.device, dtype=x.dtype)
+            batch_size = int(torch.max(batch_mapping).item() + 1) if batch_mapping.numel() > 0 else 0
+            if batch_size == 0:
+                # Handle case where batch is empty
+                if return_attention:
+                    return torch.empty(0, self.st_fast.decoder_linear.out_features, device=x.device, dtype=x.dtype), {}
+                return torch.empty(0, self.st_fast.decoder_linear.out_features, device=x.device, dtype=x.dtype)
+
+            if return_attention:
+                return torch.zeros(batch_size, self.st_fast.decoder_linear.out_features, device=x.device, dtype=x.dtype), {}
+            return torch.zeros(batch_size, self.st_fast.decoder_linear.out_features, device=x.device, dtype=x.dtype)
 
         # 兼容不同版本的max_items获取方式
         if hasattr(batch, 'max_edge_global'):
@@ -830,6 +872,11 @@ class Estimator(nn.Module):
         h, _ = to_dense_batch(h, edge_batch_index, fill_value=0, max_num_nodes=num_max_items)
 
         # 4. Pass through the core ESA model
-        predictions = self.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items)
+        esa_out = self.st_fast(h, edge_index, batch_mapping, num_max_items=num_max_items, return_attention=return_attention)
         
+        if return_attention:
+            predictions, attn_weights = esa_out
+            return predictions.squeeze(-1), attn_weights
+
+        predictions = esa_out
         return predictions.squeeze(-1)

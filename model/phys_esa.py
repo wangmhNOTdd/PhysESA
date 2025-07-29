@@ -68,22 +68,18 @@ class PhysESA(pl.LightningModule):
         self.test_pearson = PearsonCorrCoef()
         self.test_spearman = SpearmanCorrCoef()
 
-    def forward(self, batch: Batch) -> torch.Tensor:
+    def forward(self, batch: Batch, return_attention: bool = False):
         """
         执行多尺度前向传播。
+        可选择返回粗粒度编码器的注意力权重用于可视化。
         """
-
-        # --- 1. 原子级别编码 ---
         # --- 1. 原子级别编码 ---
         atomic_edge_embeds, _ = self.atomic_encoder(batch, return_embeds=True)
 
         # --- 2. 从原子到粗粒度的池化 ---
-        # --- 2a. 边 -> 原子: 将更新后的边特征聚合回原子上 ---
         source_nodes = batch.edge_index[0]
         num_atomic_nodes = batch.num_nodes
         updated_atomic_node_features = scatter_sum(atomic_edge_embeds, source_nodes, dim=0, dim_size=num_atomic_nodes)
-
-        # --- 2b. 原子 -> 粗粒度节点: 将更新后的原子特征池化到粗粒度图 ---
             
         coarse_node_features = scatter_sum(
             updated_atomic_node_features,
@@ -92,7 +88,6 @@ class PhysESA(pl.LightningModule):
             dim_size=batch.num_coarse_nodes
         )
         
-        # 确保池化后的节点数与粗粒度图的节点数一致
         num_expected_coarse_nodes = batch.coarse_pos.shape[0]
         if coarse_node_features.shape[0] < num_expected_coarse_nodes:
             pad_size = num_expected_coarse_nodes - coarse_node_features.shape[0]
@@ -103,24 +98,29 @@ class PhysESA(pl.LightningModule):
         coarse_batch = Batch(
             x=coarse_node_features,
             edge_index=batch.coarse_edge_index,
-            edge_attr=None, # 粗粒度图没有显式边特征
-            batch=batch.coarse_batch, # 需要在数据准备阶段创建这个映射
+            edge_attr=None,
+            batch=batch.coarse_batch,
             pos=batch.coarse_pos,
-            max_edge_global=batch.coarse_max_edge_global, # 需要在数据准备阶段计算
-            max_node_global=batch.coarse_max_node_global  # 需要在数据准备阶段计算
+            max_edge_global=batch.coarse_max_edge_global,
+            max_node_global=batch.coarse_max_node_global
         )
 
         # --- 4. 粗粒度级别编码和预测 ---
-
-        predictions = self.coarse_encoder(coarse_batch)
-        
-        return predictions
+        if return_attention:
+            predictions, attn_weights = self.coarse_encoder(coarse_batch, return_attention=True)
+            return predictions, attn_weights
+        else:
+            predictions = self.coarse_encoder(coarse_batch, return_attention=False)
+            return predictions
 
     def _common_step(self, batch, batch_idx):
         """Common logic for training, validation, and test steps."""
         y_true = batch.y
         # The output of forward is already squeezed, so we use it directly.
-        y_pred = self(batch)
+        if 'return_attention' in self.forward.__code__.co_varnames:
+            y_pred = self(batch, return_attention=False)
+        else:
+            y_pred = self(batch)
         
         loss = F.mse_loss(y_pred, y_true.squeeze())
         return loss, y_pred, y_true
