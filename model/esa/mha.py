@@ -77,7 +77,9 @@ class MAB(nn.Module):
             # Slower path for visualization that returns attention weights
             attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(head_dim)
             if adj_mask is not None:
-                attn_scores = attn_scores.masked_fill(adj_mask, -1e9)
+                # For masked_fill, the mask must be a boolean tensor.
+                # The mask from xformers can be float, so we convert it.
+                attn_scores = attn_scores.masked_fill(adj_mask.to(torch.bool), -1e9)
             
             attn_weights = F.softmax(attn_scores, dim=-1)
 
