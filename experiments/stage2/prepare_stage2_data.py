@@ -124,6 +124,7 @@ def main():
         'test': (test_ids, 'test.pkl')
     }
     
+    all_processed_data = []
     for split_name, (complex_ids, filename) in datasets.items():
         if not complex_ids:
             print(f"警告: {split_name} 集为空，跳过")
@@ -137,15 +138,45 @@ def main():
             print(f"错误: {split_name} 集没有有效数据")
             continue
         
+        all_processed_data.extend(processed_data)
+        
         output_file = os.path.join(args.output_dir, filename)
         with open(output_file, 'wb') as f:
             pickle.dump(processed_data, f)
         
         print(f"{split_name} 数据已保存到: {output_file}")
 
+    # --- 计算并保存填充维度 ---
+    import math
+    def nearest_multiple_of_8(n):
+        return math.ceil(n / 8) * 8
+
+    atomic_node_counts = [d.num_nodes for d in all_processed_data]
+    atomic_edge_counts = [d.edge_index.shape[1] for d in all_processed_data]
+    coarse_node_counts = [d.num_coarse_nodes for d in all_processed_data]
+    coarse_edge_counts = [d.coarse_edge_index.shape[1] for d in all_processed_data]
+
+    raw_max_atomic_nodes = max(atomic_node_counts) if atomic_node_counts else 0
+    raw_max_atomic_edges = max(atomic_edge_counts) if atomic_edge_counts else 0
+    final_max_atomic_nodes = nearest_multiple_of_8(raw_max_atomic_nodes + 1)
+    final_max_atomic_edges = nearest_multiple_of_8(raw_max_atomic_edges + 1)
+
+    raw_max_coarse_nodes = max(coarse_node_counts) if coarse_node_counts else 0
+    raw_max_coarse_edges = max(coarse_edge_counts) if coarse_edge_counts else 0
+    final_max_coarse_nodes = nearest_multiple_of_8(raw_max_coarse_nodes + 1)
+    final_max_coarse_edges = nearest_multiple_of_8(raw_max_coarse_edges + 1)
+
+    padding_dimensions = {
+        'atomic_nodes': final_max_atomic_nodes,
+        'atomic_edges': final_max_atomic_edges,
+        'coarse_nodes': final_max_coarse_nodes,
+        'coarse_edges': final_max_coarse_edges
+    }
+
     # 保存元数据
     metadata_info = {
         'feature_dimensions': graph_builder.get_feature_dimensions(),
+        'padding_dimensions': padding_dimensions,
         'graph_builder_config': {
             'cutoff_radius': args.cutoff_radius,
             'num_gaussians': args.num_gaussians,

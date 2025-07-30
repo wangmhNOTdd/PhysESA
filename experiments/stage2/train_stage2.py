@@ -188,33 +188,22 @@ def main():
     val_dataset = Stage2Dataset(os.path.join(args.data_dir, 'valid.pkl'))
     test_dataset = Stage2Dataset(os.path.join(args.data_dir, 'test.pkl'))
     
-    # --- 为多尺度图计算全局最大节点/边数 ---
+    # --- 从metadata加载填充尺寸 ---
+    padding_config = metadata.get('padding_dimensions')
+    if not padding_config:
+        raise ValueError("错误: metadata.json 中未找到 'padding_dimensions'。请重新运行 prepare_stage2_data.py。")
+
+    final_max_atomic_nodes = padding_config['atomic_nodes']
+    final_max_atomic_edges = padding_config['atomic_edges']
+    final_max_coarse_nodes = padding_config['coarse_nodes']
+    final_max_coarse_edges = padding_config['coarse_edges']
+    
+    # set_max_items 需要的是原始的最大边数，而不是填充后的
+    # 我们需要从数据集中重新计算这个值
     full_dataset = train_dataset.data + val_dataset.data + test_dataset.data
-    
-    # 原子图
-    atomic_node_counts = [d.num_nodes for d in full_dataset]
-    atomic_edge_counts = [d.edge_index.shape[1] for d in full_dataset]
-    
-    # 粗粒度图
-    coarse_node_counts = [d.num_coarse_nodes for d in full_dataset]
-    coarse_edge_counts = [d.coarse_edge_index.shape[1] for d in full_dataset]
+    raw_max_atomic_edges = max([d.edge_index.shape[1] for d in full_dataset]) if full_dataset else 0
+    raw_max_coarse_edges = max([d.coarse_edge_index.shape[1] for d in full_dataset]) if full_dataset else 0
 
-    def nearest_multiple_of_8(n):
-        return math.ceil(n / 8) * 8
-
-    # 计算原子图的填充尺寸
-    raw_max_atomic_nodes = max(atomic_node_counts) if atomic_node_counts else 0
-    raw_max_atomic_edges = max(atomic_edge_counts) if atomic_edge_counts else 0
-    final_max_atomic_nodes = nearest_multiple_of_8(raw_max_atomic_nodes + 1)
-    final_max_atomic_edges = nearest_multiple_of_8(raw_max_atomic_edges + 1)
-
-    # 计算粗粒度图的填充尺寸
-    raw_max_coarse_nodes = max(coarse_node_counts) if coarse_node_counts else 0
-    raw_max_coarse_edges = max(coarse_edge_counts) if coarse_edge_counts else 0
-    final_max_coarse_nodes = nearest_multiple_of_8(raw_max_coarse_nodes + 1)
-    final_max_coarse_edges = nearest_multiple_of_8(raw_max_coarse_edges + 1)
-
-    # 为两个尺度的模型设置填充大小
     esa_config['atomic_encoder_config']['set_max_items'] = raw_max_atomic_edges
     esa_config['coarse_encoder_config']['set_max_items'] = raw_max_coarse_edges
     

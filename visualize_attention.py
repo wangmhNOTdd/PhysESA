@@ -135,11 +135,22 @@ def main():
     # 暂时使用一个估算值，但这可能不是最优的
     print("警告: max_nodes/edges 的恢复依赖于超参数，请确保检查点包含正确的配置。")
     
+    # 从metadata中恢复准确的填充尺寸，而不是依赖粗略估计
+    metadata_path = os.path.join(args.data_dir, 'metadata.json')
+    with open(metadata_path, 'r') as f:
+        metadata = json.load(f)
+    
+    padding_config = metadata.get('padding_dimensions', {})
+    final_max_atomic_nodes = padding_config.get('atomic_nodes', atomic_max_edges * 2)
+    final_max_atomic_edges = padding_config.get('atomic_edges', atomic_max_edges + 8)
+    final_max_coarse_nodes = padding_config.get('coarse_nodes', coarse_max_edges * 2)
+    final_max_coarse_edges = padding_config.get('coarse_edges', coarse_max_edges + 8)
+
     collater = MultiScaleCollater(
-        atomic_max_nodes=atomic_max_edges * 2, # 粗略估计
-        atomic_max_edges=atomic_max_edges + 8,
-        coarse_max_nodes=coarse_max_edges * 2, # 粗略估计
-        coarse_max_edges=coarse_max_edges + 8
+        atomic_max_nodes=final_max_atomic_nodes,
+        atomic_max_edges=final_max_atomic_edges,
+        coarse_max_nodes=final_max_coarse_nodes,
+        coarse_max_edges=final_max_coarse_edges
     )
 
     # --- 3. 加载特定样本 ---
