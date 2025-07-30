@@ -8,6 +8,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 import sys
+from torch_geometric.data import Data
 
 # Add project root to sys.path
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -17,26 +18,28 @@ sys.path.append(os.path.join(project_root, 'model'))
 from model.phys_esa import PhysESA
 from experiments.stage2.train_stage2 import MultiScaleCollater, Stage2Dataset
 
-def get_coarse_graph_edge_labels(data):
+def get_coarse_graph_edge_labels(data: Data):
     """为粗粒度图的边生成可读的标签。"""
-    # 这是一个简化的示例，需要根据您的具体数据结构进行调整
-    # 我们需要一个方法来从 coarse_node_idx 映射回 res_id 或 motif_id
-    # 这部分信息目前不在Data对象中，需要从原始数据构建过程中获取
-    # 作为临时方案，我们只使用索引
-    
-    num_coarse_nodes = data.num_coarse_nodes
-    node_labels = [f"Node_{i}" for i in range(num_coarse_nodes)] # 简化标签
+    if not hasattr(data, 'coarse_node_id_map'):
+        print("警告: Data对象中缺少 'coarse_node_id_map'。将使用通用节点标签。")
+        node_labels = {i: f"Node_{i}" for i in range(data.num_coarse_nodes)}
+    else:
+        # 清理标签，使其更易读
+        node_labels = {i: label.replace('_', ' ').replace('LIG MOTIF', 'LIG')
+                       for i, label in data.coarse_node_id_map.items()}
 
     edge_labels = []
     for i in range(data.coarse_edge_index.shape[1]):
         src_idx = data.coarse_edge_index[0, i].item()
         dst_idx = data.coarse_edge_index[1, i].item()
-        edge_labels.append(f"{node_labels[src_idx]}-{node_labels[dst_idx]}")
+        src_label = node_labels.get(src_idx, f"N{src_idx}")
+        dst_label = node_labels.get(dst_idx, f"N{dst_idx}")
+        edge_labels.append(f"{src_label} - {dst_label}")
     return edge_labels
 
 def visualize_attention(
     model: PhysESA,
-    data_sample: torch.utils.data.Dataset,
+    data_sample: Data,
     output_path: str,
     collater: MultiScaleCollater
 ):
@@ -83,7 +86,7 @@ def visualize_attention(
 
     # 创建DataFrame以便于绘图
     df = pd.DataFrame(avg_pma_attention.cpu().numpy(), columns=edge_labels)
-    df.index = [f"Seed_{i}" for i in range(df.shape[0])]
+    df.index = pd.Index([f"Seed_{i}" for i in range(df.shape[0])], name="PMA Seed Vectors")
 
     # 绘图
     plt.figure(figsize=(max(20, len(edge_labels) // 2), max(10, df.shape[0] // 2)))
