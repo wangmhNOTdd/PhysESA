@@ -53,8 +53,22 @@ class MultiScaleCollater:
         if not batch:
             return None # 如果批次为空，直接返回
 
-        # 1. PyG的默认批处理会正确处理 `edge_index` 和 `batch` 属性
+        # --- 手动处理非张量类型的自定义属性 ---
+        # 提取 coarse_node_id_map 并从原始data对象中移除，以避免collate错误
+        coarse_node_id_maps = []
+        for data in batch:
+            if hasattr(data, 'coarse_node_id_map'):
+                coarse_node_id_maps.append(data.coarse_node_id_map)
+                del data.coarse_node_id_map
+            else:
+                # 如果某个样本没有这个属性，添加一个None占位符
+                coarse_node_id_maps.append(None)
+
+        # 1. PyG的默认批处理现在可以安全执行
         batch_data = Batch.from_data_list(batch)
+        
+        # 将提取出的属性重新添加到批处理对象中
+        batch_data.coarse_node_id_map = coarse_node_id_maps
 
         # 2. 手动处理自定义图属性的批次偏移
         coarse_node_offset = 0
