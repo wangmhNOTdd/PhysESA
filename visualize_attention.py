@@ -56,7 +56,7 @@ def visualize_top_interactions_3d(
         num_top_edges = 1 # 至少保留一条边
         
     top_scores, top_indices = torch.topk(edge_scores, k=num_top_edges)
-    top_edges = data_sample.coarse_edge_index[:, top_indices]
+    top_edges = data_sample.coarse_edge_index[:, top_indices.cpu()]
 
     print(f"总粗粒度边数: {num_real_edges}")
     print(f"保留Top {top_k_percent*100:.0f}% 的边: {num_top_edges}")
