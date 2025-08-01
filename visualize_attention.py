@@ -3,11 +3,8 @@ import torch
 import argparse
 import json
 import pickle
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-import pandas as pd
 import sys
+import py3Dmol
 from torch_geometric.data import Data
 
 # Add project root to sys.path
@@ -18,150 +15,131 @@ sys.path.append(os.path.join(project_root, 'model'))
 from model.phys_esa import PhysESA
 from experiments.stage2.train_stage2 import MultiScaleCollater, Stage2Dataset
 
-def get_coarse_graph_edge_labels(data: Data):
-    """为粗粒度图的边生成可读的标签。"""
-    if not hasattr(data, 'coarse_node_id_map'):
-        print("警告: Data对象中缺少 'coarse_node_id_map'。将使用通用节点标签。")
-        node_labels = {i: f"Node_{i}" for i in range(data.num_coarse_nodes)}
-    else:
-        # 清理标签，使其更易读
-        node_labels = {i: label.replace('_', ' ').replace('LIG MOTIF', 'LIG')
-                       for i, label in data.coarse_node_id_map.items()}
-
-    edge_labels = []
-    for i in range(data.coarse_edge_index.shape[1]):
-        src_idx = data.coarse_edge_index[0, i].item()
-        dst_idx = data.coarse_edge_index[1, i].item()
-        src_label = node_labels.get(src_idx, f"N{src_idx}")
-        dst_label = node_labels.get(dst_idx, f"N{dst_idx}")
-        edge_labels.append(f"{src_label} - {dst_label}")
-    return edge_labels
-
-def visualize_attention(
+def visualize_top_interactions_3d(
     model: PhysESA,
     data_sample: Data,
     output_path: str,
-    collater: MultiScaleCollater
+    collater: MultiScaleCollater,
+    top_k_percent: float = 0.1
 ):
     """
-    可视化单个样本的粗粒度图注意力权重。
+    可视化单个样本中注意力分数最高的粗粒度相互作用网络。
     """
     model.eval()
     
-    # 使用 collater 来创建批次，即使只有一个样本
     batch = collater([data_sample])
-    
-    # 将数据移动到模型所在的设备
     device = next(model.parameters()).device
     batch = batch.to(device)
 
     with torch.no_grad():
-        # 请求返回注意力权重
         predictions, attention_weights = model(batch, return_attention=True)
 
     print(f"模型预测亲和力: {predictions.item():.4f}")
-    print("提取到的注意力权重字典键:", attention_weights.keys())
 
-    # 我们最关心PMA层的注意力，它在粗粒度编码器的解码器第一层
-    # 根据ESA的结构，这通常是 'decoder_layer_0'
     if 'decoder_layer_0' not in attention_weights:
-        print("错误: 未找到 'decoder_layer_0' 的注意力权重。请检查模型结构。")
+        print("错误: 未找到 'decoder_layer_0' (PMA) 的注意力权重。")
         return
 
-    # (batch_size, num_heads, num_seeds, num_edges)
-    pma_attention = attention_weights['decoder_layer_0'].squeeze(0) # 移除batch维度
+    pma_attention = attention_weights['decoder_layer_0'].squeeze(0)
     
-    # 为了可视化，我们将所有头的注意力平均起来
-    # (num_seeds, num_edges)
-    avg_pma_attention = pma_attention.mean(dim=0) 
-
-    # 获取边的标签
-    edge_labels = get_coarse_graph_edge_labels(data_sample)
+    # 1. 聚合每个边的注意力分数 (跨头和种子向量)
+    # Shape: (num_heads, num_seeds, num_edges) -> (num_edges,)
+    edge_scores = pma_attention.mean(dim=[0, 1])
     
-    # 检查维度是否匹配
-    if avg_pma_attention.shape[1] != len(edge_labels):
-        print(f"警告: 注意力权重维度 ({avg_pma_attention.shape[1]}) 与边标签数量 ({len(edge_labels)}) 不匹配。")
-        # 可能是由于填充（padding）导致的，我们只取有效部分
-        avg_pma_attention = avg_pma_attention[:, :len(edge_labels)]
+    # 裁剪掉填充部分
+    num_real_edges = data_sample.coarse_edge_index.shape[1]
+    edge_scores = edge_scores[:num_real_edges]
 
-    # 创建DataFrame以便于绘图
-    df = pd.DataFrame(avg_pma_attention.cpu().numpy(), columns=edge_labels)
-    df.index = pd.Index([f"Seed_{i}" for i in range(df.shape[0])], name="PMA Seed Vectors")
+    # 2. 筛选出注意力最高的边
+    num_top_edges = int(num_real_edges * top_k_percent)
+    if num_top_edges == 0 and num_real_edges > 0:
+        num_top_edges = 1 # 至少保留一条边
+        
+    top_scores, top_indices = torch.topk(edge_scores, k=num_top_edges)
+    top_edges = data_sample.coarse_edge_index[:, top_indices]
 
-    # 绘图
-    plt.figure(figsize=(max(20, len(edge_labels) // 2), max(10, df.shape[0] // 2)))
-    sns.heatmap(df, cmap="viridis", annot=False) # 对于大型矩阵，关闭annot
-    plt.title(f"PMA Attention Weights for {data_sample.complex_id}", fontsize=16)
-    plt.xlabel("Coarse-Grained Edges (Residue/Motif Interactions)", fontsize=12)
-    plt.ylabel("PMA Seed Vectors", fontsize=12)
-    plt.xticks(rotation=90)
-    plt.yticks(rotation=0)
+    print(f"总粗粒度边数: {num_real_edges}")
+    print(f"保留Top {top_k_percent*100:.0f}% 的边: {num_top_edges}")
+
+    # 3. 准备3D可视化数据
+    node_coords = data_sample.coarse_pos.cpu().numpy()
+    node_id_map = data_sample.coarse_node_id_map
     
-    # 保存图像
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"注意力热力图已保存至: {output_path}")
-    plt.close()
+    # 找出所有参与重要相互作用的节点
+    involved_nodes = torch.unique(top_edges.flatten()).cpu().numpy()
+
+    # 4. 使用 py3Dmol 创建可视化
+    view = py3Dmol.view(width=800, height=600)
+
+    # 添加节点（球体）
+    for node_idx in involved_nodes:
+        pos = node_coords[node_idx].tolist()
+        label = node_id_map.get(node_idx, f"Node_{node_idx}")
+        
+        if label.startswith("LIG"):
+            color = "green"
+        else:
+            color = "blue"
+            
+        view.addSphere({
+            'center': {'x': pos[0], 'y': pos[1], 'z': pos[2]},
+            'radius': 0.8,
+            'color': color,
+            'alpha': 0.9
+        })
+        view.addLabel(label, {'position': {'x': pos[0], 'y': pos[1], 'z': pos[2]}, 'fontColor': 'white', 'fontSize': 10, 'backgroundColor': 'black', 'backgroundOpacity': 0.5})
+
+    # 添加边（圆柱）
+    for i in range(top_edges.shape[1]):
+        src_idx, dst_idx = top_edges[:, i].cpu().numpy()
+        src_pos = node_coords[src_idx].tolist()
+        dst_pos = node_coords[dst_idx].tolist()
+        
+        view.addCylinder({
+            'start': {'x': src_pos[0], 'y': src_pos[1], 'z': src_pos[2]},
+            'end': {'x': dst_pos[0], 'y': dst_pos[1], 'z': dst_pos[2]},
+            'color': 'orange',
+            'radius': 0.2,
+            'dashed': False
+        })
+
+    view.zoomTo()
+    view.write_html(output_path)
+    print(f"3D可视化网络已保存至: {output_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PhysESA Attention Visualization")
+    parser = argparse.ArgumentParser(description="PhysESA Top Interaction Network Visualization")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint (.ckpt).")
     parser.add_argument("--data_dir", type=str, default="./experiments/stage2", help="Directory containing the processed data.")
     parser.add_argument("--sample_id", type=str, default=None, help="Specific complex ID to visualize (e.g., '1a4k'). If not provided, the first sample from the test set is used.")
-    parser.add_argument("--output", type=str, default="attention_heatmap.png", help="Path to save the output heatmap image.")
+    parser.add_argument("--output", type=str, default="top_interactions.html", help="Path to save the output HTML file.")
+    parser.add_argument("--top_k", type=float, default=0.1, help="Percentage of top edges to keep (e.g., 0.1 for 10%).")
     
     args = parser.parse_args()
 
-    # --- 1. 加载配置和数据 ---
-    # 我们需要从训练脚本中获取配置信息
-    metadata_path = os.path.join(args.data_dir, 'metadata.json')
-    if not os.path.exists(metadata_path):
-        raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-
-    # 加载模型时，PyTorch Lightning会自动加载hyperparameters
-    # 我们只需要确保模型类可被找到
     model = PhysESA.load_from_checkpoint(args.checkpoint)
     print("模型已加载。")
 
-    # --- 2. 准备数据加载器和Collater ---
-    # 我们需要collater来正确构建批次
-    # 注意：这里的max_nodes/edges需要和训练时一致，我们从模型的超参数中获取
-    atomic_max_edges = model.hparams.esa_config['atomic_encoder_config']['set_max_items']
-    coarse_max_edges = model.hparams.esa_config['coarse_encoder_config']['set_max_items']
-    
-    # 注意：max_nodes没有直接保存在esa_config中，需要一个更好的方式来获取
-    # 暂时使用一个估算值，但这可能不是最优的
-    print("警告: max_nodes/edges 的恢复依赖于超参数，请确保检查点包含正确的配置。")
-    
-    # 从metadata中恢复准确的填充尺寸，而不是依赖粗略估计
     metadata_path = os.path.join(args.data_dir, 'metadata.json')
     with open(metadata_path, 'r') as f:
         metadata = json.load(f)
     
-    padding_config = metadata.get('padding_dimensions', {})
-    final_max_atomic_nodes = padding_config.get('atomic_nodes', atomic_max_edges * 2)
-    final_max_atomic_edges = padding_config.get('atomic_edges', atomic_max_edges + 8)
-    final_max_coarse_nodes = padding_config.get('coarse_nodes', coarse_max_edges * 2)
-    final_max_coarse_edges = padding_config.get('coarse_edges', coarse_max_edges + 8)
+    padding_config = metadata.get('padding_dimensions')
+    if not padding_config:
+        raise ValueError("错误: metadata.json 中未找到 'padding_dimensions'。请重新运行 prepare_stage2_data.py。")
 
     collater = MultiScaleCollater(
-        atomic_max_nodes=final_max_atomic_nodes,
-        atomic_max_edges=final_max_atomic_edges,
-        coarse_max_nodes=final_max_coarse_nodes,
-        coarse_max_edges=final_max_coarse_edges
+        atomic_max_nodes=padding_config['atomic_nodes'],
+        atomic_max_edges=padding_config['atomic_edges'],
+        coarse_max_nodes=padding_config['coarse_nodes'],
+        coarse_max_edges=padding_config['coarse_edges']
     )
 
-    # --- 3. 加载特定样本 ---
     test_dataset = Stage2Dataset(os.path.join(args.data_dir, 'test.pkl'))
     
     if args.sample_id:
-        sample_idx = -1
-        for i, data in enumerate(test_dataset.data):
-            if data.complex_id == args.sample_id:
-                sample_idx = i
-                break
+        sample_idx = next((i for i, data in enumerate(test_dataset.data) if data.complex_id == args.sample_id), -1)
         if sample_idx == -1:
             raise ValueError(f"Sample ID {args.sample_id} not found in the test set.")
         data_sample = test_dataset[sample_idx]
@@ -171,8 +149,7 @@ def main():
 
     print(f"正在可视化样本: {data_sample.complex_id}")
 
-    # --- 4. 运行可视化 ---
-    visualize_attention(model, data_sample, args.output, collater)
+    visualize_top_interactions_3d(model, data_sample, args.output, collater, top_k_percent=args.top_k)
 
 if __name__ == "__main__":
     main()
