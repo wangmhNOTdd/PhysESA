@@ -4,7 +4,8 @@ import argparse
 import json
 import pickle
 import sys
-import py3Dmol
+import networkx as nx
+import matplotlib.pyplot as plt
 from torch_geometric.data import Data
 
 # Add project root to sys.path
@@ -61,105 +62,24 @@ def visualize_top_interactions_3d(
     print(f"总粗粒度边数: {num_real_edges}")
     print(f"保留Top {top_k_percent*100:.0f}% 的边: {num_top_edges}")
 
-# --- DEBUG BLOCK ---
-    print("\n--- DEBUG INFO ---")
-    _node_id_map_debug = getattr(data_sample, 'coarse_node_id_map', None)
-    if _node_id_map_debug is not None and isinstance(_node_id_map_debug, dict):
-        print(f"成功加载 'coarse_node_id_map'，包含 {len(_node_id_map_debug)} 个条目。")
-        if _node_id_map_debug:
-            first_key = next(iter(_node_id_map_debug.keys()))
-            print(f"Map中第一个键的类型: {type(first_key)}")
-            print(f"Map中第一个键值对: {first_key}: {_node_id_map_debug[first_key]}")
-            
-            a_src_idx = top_edges[0, 0].item()
-            print(f"要检查的节点索引类型: {type(a_src_idx)}")
-            print(f"检查索引 {a_src_idx} 是否在map中: {a_src_idx in _node_id_map_debug}")
-        else:
-            print("Map为空。")
-    else:
-        print("错误: 'coarse_node_id_map' 未找到或类型不正确。")
-    print("--- END DEBUG INFO ---\n")
-    # --- END DEBUG BLOCK ---
-    # 3. 筛选出同时具有有效标签的边
-    node_id_map = getattr(data_sample, 'coarse_node_id_map', {})
+    # 3. 使用 NetworkX 创建和绘制图形
+    G = nx.Graph()
     
-    valid_edges_list = []
-    valid_scores_list = []
-    for i in range(top_edges.shape[1]):
-        src_idx, dst_idx = top_edges[:, i]
-        if src_idx.item() in node_id_map and dst_idx.item() in node_id_map:
-            valid_edges_list.append(top_edges[:, i].unsqueeze(1))
-            valid_scores_list.append(top_scores[i].unsqueeze(0))
+    # 添加边
+    edges_to_add = top_edges.cpu().numpy().T
+    G.add_edges_from(edges_to_add)
 
-    view = py3Dmol.view(width=800, height=600)
-    if not valid_edges_list:
-        view.addLabel("No interactions with valid labels found.", {'position': {'x': 0, 'y': 0, 'z': 0}, 'fontColor': 'red'})
-        view.write_html(output_path)
-        print(f"警告: 未找到带有有效标签的相互作用，已生成空的可视化文件: {output_path}")
-        return
+    # 绘制图形
+    plt.figure(figsize=(12, 12))
+    pos = nx.spring_layout(G, seed=42) # 使用弹簧布局
+    
+    nx.draw(G, pos, with_labels=False, node_color='skyblue', node_size=80, edge_color='gray', width=1.0, alpha=0.7)
+    
+    plt.title(f"Top {top_k_percent*100:.0f}% Interaction Network for {getattr(data_sample, 'complex_id', 'Unknown')}")
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
-    final_edges = torch.cat(valid_edges_list, dim=1)
-    final_scores = torch.cat(valid_scores_list, dim=0)
-    print(f"其中具有有效标签的边: {final_edges.shape[1]}")
-
-    # 4. 准备3D可视化数据
-    node_coords = data_sample.coarse_pos.cpu().numpy()
-    involved_nodes = torch.unique(final_edges.flatten()).cpu().numpy()
-
-    # 5. 使用 py3Dmol 创建可视化
-    # 添加节点（球体）
-    for node_idx in involved_nodes:
-        pos = node_coords[node_idx].tolist()
-        label = node_id_map.get(node_idx) # 我们知道它存在
-        
-        # 简化标签
-        simplified_label = label.split('_', 1)[1] if '_' in label else label
-
-        if label.startswith("LIG"):
-            color = "#32CD32"  # LimeGreen
-            radius = 0.9
-        else:
-            color = "#1E90FF"  # DodgerBlue
-            radius = 0.7
-            
-        view.addSphere({
-            'center': {'x': pos[0], 'y': pos[1], 'z': pos[2]},
-            'radius': radius,
-            'color': color,
-            'alpha': 0.95
-        })
-        view.addLabel(simplified_label, {'position': {'x': pos[0], 'y': pos[1], 'z': pos[2]}, 'fontColor': 'white', 'fontSize': 9, 'backgroundColor': 'black', 'backgroundOpacity': 0.4})
-
-    # 添加边（圆柱）
-    min_score, max_score = final_scores.min(), final_scores.max()
-    if (max_score - min_score) > 1e-6:
-        normalized_scores = (final_scores - min_score) / (max_score - min_score)
-    else:
-        normalized_scores = torch.ones_like(final_scores)
-
-    for i in range(final_edges.shape[1]):
-        src_idx, dst_idx = final_edges[:, i].cpu().numpy()
-        src_pos = node_coords[src_idx].tolist()
-        dst_pos = node_coords[dst_idx].tolist()
-        
-        score = normalized_scores[i].item()
-        
-        r, g, b = 255, int(255 * (1 - score)), 0
-        color_hex = f'#{r:02x}{g:02x}{b:02x}'
-        
-        radius = 0.1 + score * 0.25
-        
-        view.addCylinder({
-            'start': {'x': src_pos[0], 'y': src_pos[1], 'z': src_pos[2]},
-            'end': {'x': dst_pos[0], 'y': dst_pos[1], 'z': dst_pos[2]},
-            'color': color_hex,
-            'radius': radius,
-            'dashed': False
-        })
-
-    view.zoomTo()
-    view.write_html(output_path)
-    print(f"3D可视化网络已保存至: {output_path}")
+    print(f"2D网络图已保存至: {output_path}")
 
 
 def main():
@@ -167,7 +87,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint (.ckpt).")
     parser.add_argument("--data_dir", type=str, default="./experiments/stage2", help="Directory containing the processed data.")
     parser.add_argument("--sample_id", type=str, default=None, help="Specific complex ID to visualize (e.g., '1a4k'). If not provided, the first sample from the test set is used.")
-    parser.add_argument("--output", type=str, default="top_interactions.html", help="Path to save the output HTML file.")
+    parser.add_argument("--output", type=str, default="top_interactions.png", help="Path to save the output PNG image file.")
     parser.add_argument("--top_k", type=float, default=0.1, help="Percentage of top edges to keep (e.g., 0.1 for 10%).")
     
     args = parser.parse_args()
