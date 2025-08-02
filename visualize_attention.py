@@ -63,7 +63,7 @@ def visualize_top_interactions_3d(
 
     # 3. 准备3D可视化数据
     node_coords = data_sample.coarse_pos.cpu().numpy()
-    node_id_map = data_sample.coarse_node_id_map
+    node_id_map = getattr(data_sample, 'coarse_node_id_map', {})
     
     # 找出所有参与重要相互作用的节点
     involved_nodes = torch.unique(top_edges.flatten()).cpu().numpy()
