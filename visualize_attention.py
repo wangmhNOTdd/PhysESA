@@ -61,26 +61,40 @@ def visualize_top_interactions_3d(
     print(f"总粗粒度边数: {num_real_edges}")
     print(f"保留Top {top_k_percent*100:.0f}% 的边: {num_top_edges}")
 
-    # 3. 准备3D可视化数据
-    node_coords = data_sample.coarse_pos.cpu().numpy()
+    # 3. 筛选出同时具有有效标签的边
     node_id_map = getattr(data_sample, 'coarse_node_id_map', {})
     
-    # 找出所有参与重要相互作用的节点
-    involved_nodes = torch.unique(top_edges.flatten()).cpu().numpy()
+    valid_edges_list = []
+    valid_scores_list = []
+    for i in range(top_edges.shape[1]):
+        src_idx, dst_idx = top_edges[:, i]
+        if src_idx.item() in node_id_map and dst_idx.item() in node_id_map:
+            valid_edges_list.append(top_edges[:, i].unsqueeze(1))
+            valid_scores_list.append(top_scores[i].unsqueeze(0))
 
-    # 4. 使用 py3Dmol 创建可视化
     view = py3Dmol.view(width=800, height=600)
+    if not valid_edges_list:
+        view.addLabel("No interactions with valid labels found.", {'position': {'x': 0, 'y': 0, 'z': 0}, 'fontColor': 'red'})
+        view.write_html(output_path)
+        print(f"警告: 未找到带有有效标签的相互作用，已生成空的可视化文件: {output_path}")
+        return
 
-    # 添加节点（球体），并根据类型调整样式
+    final_edges = torch.cat(valid_edges_list, dim=1)
+    final_scores = torch.cat(valid_scores_list, dim=0)
+    print(f"其中具有有效标签的边: {final_edges.shape[1]}")
+
+    # 4. 准备3D可视化数据
+    node_coords = data_sample.coarse_pos.cpu().numpy()
+    involved_nodes = torch.unique(final_edges.flatten()).cpu().numpy()
+
+    # 5. 使用 py3Dmol 创建可视化
+    # 添加节点（球体）
     for node_idx in involved_nodes:
         pos = node_coords[node_idx].tolist()
-        label = node_id_map.get(node_idx, f"Node_{node_idx}")
+        label = node_id_map.get(node_idx) # 我们知道它存在
         
-        try:
-            # 尝试简化标签，例如 'A_ILE_56' -> 'ILE_56'
-            simplified_label = label.split('_', 1)[1]
-        except IndexError:
-            simplified_label = label
+        # 简化标签
+        simplified_label = label.split('_', 1)[1] if '_' in label else label
 
         if label.startswith("LIG"):
             color = "#32CD32"  # LimeGreen
@@ -97,27 +111,24 @@ def visualize_top_interactions_3d(
         })
         view.addLabel(simplified_label, {'position': {'x': pos[0], 'y': pos[1], 'z': pos[2]}, 'fontColor': 'white', 'fontSize': 9, 'backgroundColor': 'black', 'backgroundOpacity': 0.4})
 
-    # 添加边（圆柱），并根据注意力分数调整样式
-    # 归一化分数用于可视化
-    min_score, max_score = top_scores.min(), top_scores.max()
+    # 添加边（圆柱）
+    min_score, max_score = final_scores.min(), final_scores.max()
     if (max_score - min_score) > 1e-6:
-        normalized_scores = (top_scores - min_score) / (max_score - min_score)
+        normalized_scores = (final_scores - min_score) / (max_score - min_score)
     else:
-        normalized_scores = torch.ones_like(top_scores)
+        normalized_scores = torch.ones_like(final_scores)
 
-    for i in range(top_edges.shape[1]):
-        src_idx, dst_idx = top_edges[:, i].cpu().numpy()
+    for i in range(final_edges.shape[1]):
+        src_idx, dst_idx = final_edges[:, i].cpu().numpy()
         src_pos = node_coords[src_idx].tolist()
         dst_pos = node_coords[dst_idx].tolist()
         
         score = normalized_scores[i].item()
         
-        # 根据分数在黄(低) -> 红(高)之间插值颜色
         r, g, b = 255, int(255 * (1 - score)), 0
         color_hex = f'#{r:02x}{g:02x}{b:02x}'
         
-        # 根据分数调整半径
-        radius = 0.1 + score * 0.25 # 半径范围 [0.1, 0.35]
+        radius = 0.1 + score * 0.25
         
         view.addCylinder({
             'start': {'x': src_pos[0], 'y': src_pos[1], 'z': src_pos[2]},
