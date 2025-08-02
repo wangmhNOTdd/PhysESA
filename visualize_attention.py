@@ -61,6 +61,25 @@ def visualize_top_interactions_3d(
     print(f"总粗粒度边数: {num_real_edges}")
     print(f"保留Top {top_k_percent*100:.0f}% 的边: {num_top_edges}")
 
+# --- DEBUG BLOCK ---
+    print("\n--- DEBUG INFO ---")
+    _node_id_map_debug = getattr(data_sample, 'coarse_node_id_map', None)
+    if _node_id_map_debug is not None and isinstance(_node_id_map_debug, dict):
+        print(f"成功加载 'coarse_node_id_map'，包含 {len(_node_id_map_debug)} 个条目。")
+        if _node_id_map_debug:
+            first_key = next(iter(_node_id_map_debug.keys()))
+            print(f"Map中第一个键的类型: {type(first_key)}")
+            print(f"Map中第一个键值对: {first_key}: {_node_id_map_debug[first_key]}")
+            
+            a_src_idx = top_edges[0, 0].item()
+            print(f"要检查的节点索引类型: {type(a_src_idx)}")
+            print(f"检查索引 {a_src_idx} 是否在map中: {a_src_idx in _node_id_map_debug}")
+        else:
+            print("Map为空。")
+    else:
+        print("错误: 'coarse_node_id_map' 未找到或类型不正确。")
+    print("--- END DEBUG INFO ---\n")
+    # --- END DEBUG BLOCK ---
     # 3. 筛选出同时具有有效标签的边
     node_id_map = getattr(data_sample, 'coarse_node_id_map', {})
     
