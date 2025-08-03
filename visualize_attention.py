@@ -15,6 +15,7 @@ sys.path.append(os.path.join(project_root, 'model'))
 
 from model.phys_esa import PhysESA
 from experiments.stage2.train_stage2 import MultiScaleCollater, Stage2Dataset
+from molecular_graph import MultiScaleGraphBuilder
 
 def visualize_top_interactions_3d(
     model: PhysESA,
@@ -85,8 +86,14 @@ def visualize_top_interactions_3d(
 def main():
     parser = argparse.ArgumentParser(description="PhysESA Top Interaction Network Visualization")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint (.ckpt).")
-    parser.add_argument("--data_dir", type=str, default="./experiments/stage2", help="Directory containing the processed data.")
-    parser.add_argument("--sample_id", type=str, default=None, help="Specific complex ID to visualize (e.g., '1a4k'). If not provided, the first sample from the test set is used.")
+    # --- 模式一: 从数据集中加载 ---
+    parser.add_argument("--data_dir", type=str, default="./experiments/stage2", help="Directory containing the processed data (for loading from dataset).")
+    parser.add_argument("--sample_id", type=str, default=None, help="Specific complex ID to visualize from the test set (e.g., '1a4k').")
+    
+    # --- 模式二: 从原始文件预测 ---
+    parser.add_argument("--pdb_file", type=str, default=None, help="Path to a new protein PDB file.")
+    parser.add_argument("--sdf_file", type=str, default=None, help="Path to a new ligand SDF file.")
+    parser.add_argument("--complex_id", type=str, default="new_complex", help="Name for the new complex.")
     parser.add_argument("--output", type=str, default="top_interactions.png", help="Path to save the output PNG image file.")
     parser.add_argument("--top_k", type=float, default=0.1, help="Percentage of top edges to keep (e.g., 0.1 for 10%).")
     
@@ -95,33 +102,71 @@ def main():
     model = PhysESA.load_from_checkpoint(args.checkpoint)
     print("模型已加载。")
 
-    metadata_path = os.path.join(args.data_dir, 'metadata.json')
-    with open(metadata_path, 'r') as f:
-        metadata = json.load(f)
-    
-    padding_config = metadata.get('padding_dimensions')
-    if not padding_config:
-        raise ValueError("错误: metadata.json 中未找到 'padding_dimensions'。请重新运行 prepare_stage2_data.py。")
+    # --- 根据参数决定执行模式 ---
+    if args.pdb_file and args.sdf_file:
+        # 模式二: 从原始文件动态构建图
+        print("--- 模式: 从文件预测新复合物 ---")
+        print(f"蛋白质 PDB: {args.pdb_file}")
+        print(f"配体 SDF: {args.sdf_file}")
 
-    collater = MultiScaleCollater(
-        atomic_max_nodes=padding_config['atomic_nodes'],
-        atomic_max_edges=padding_config['atomic_edges'],
-        coarse_max_nodes=padding_config['coarse_nodes'],
-        coarse_max_edges=padding_config['coarse_edges']
-    )
+        # 使用默认配置创建GraphBuilder
+        # 注意：这里的配置需要与训练时大致匹配
+        graph_builder = MultiScaleGraphBuilder(
+            interface_cutoff=8.0,
+            use_knn=True,
+            k=16
+        )
+        
+        data_sample = graph_builder.build_graph(
+            complex_id=args.complex_id,
+            pdb_file=args.pdb_file,
+            sdf_file=args.sdf_file
+        )
+        
+        if data_sample is None:
+            raise ValueError("无法从提供的PDB/SDF文件构建图。请检查文件格式或内容。")
+        
+        print(f"成功为 '{args.complex_id}' 构建图。")
+        
+        # 对于单个动态图，我们需要一个能处理它的Collater
+        # 我们可以基于这个图的尺寸动态创建一个Collater
+        collater = MultiScaleCollater(
+            atomic_max_nodes=data_sample.num_nodes,
+            atomic_max_edges=data_sample.edge_index.shape[1],
+            coarse_max_nodes=data_sample.num_coarse_nodes,
+            coarse_max_edges=data_sample.coarse_edge_index.shape[1]
+        )
 
-    test_dataset = Stage2Dataset(os.path.join(args.data_dir, 'test.pkl'))
-    
-    if args.sample_id:
-        sample_idx = next((i for i, data in enumerate(test_dataset.data) if data.complex_id == args.sample_id), -1)
-        if sample_idx == -1:
-            raise ValueError(f"Sample ID {args.sample_id} not found in the test set.")
-        data_sample = test_dataset[sample_idx]
     else:
-        print("未指定样本ID，使用测试集中的第一个样本。")
-        data_sample = test_dataset[0]
+        # 模式一: 从预处理的数据集中加载
+        print("--- 模式: 从数据集中加载样本 ---")
+        metadata_path = os.path.join(args.data_dir, 'metadata.json')
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+        padding_config = metadata.get('padding_dimensions')
+        if not padding_config:
+            raise ValueError("错误: metadata.json 中未找到 'padding_dimensions'。")
 
-    print(f"正在可视化样本: {data_sample.complex_id}")
+        collater = MultiScaleCollater(
+            atomic_max_nodes=padding_config['atomic_nodes'],
+            atomic_max_edges=padding_config['atomic_edges'],
+            coarse_max_nodes=padding_config['coarse_nodes'],
+            coarse_max_edges=padding_config['coarse_edges']
+        )
+
+        test_dataset = Stage2Dataset(os.path.join(args.data_dir, 'test.pkl'))
+        
+        if args.sample_id:
+            sample_idx = next((i for i, data in enumerate(test_dataset.data) if data.complex_id == args.sample_id), -1)
+            if sample_idx == -1:
+                raise ValueError(f"Sample ID {args.sample_id} not found in the test set.")
+            data_sample = test_dataset[sample_idx]
+        else:
+            print("未指定样本ID，使用测试集中的第一个样本。")
+            data_sample = test_dataset[0]
+
+    print(f"正在可视化样本: {getattr(data_sample, 'complex_id', 'Unknown')}")
 
     visualize_top_interactions_3d(model, data_sample, args.output, collater, top_k_percent=args.top_k)
 
