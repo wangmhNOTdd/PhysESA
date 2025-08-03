@@ -77,6 +77,11 @@ class MultiScaleGraphBuilder:
         这是确保不错过任何界面原子的关键。
         """
         try:
+            # --- 诊断性文件访问 ---
+            with open(pdb_file, 'r') as f:
+                pass # 仅尝试打开，如果失败会立即抛出异常
+            # --- 诊断结束 ---
+            
             structure = self.pdb_parser.get_structure("protein", pdb_file)
             atoms_data = []
             for atom in structure.get_atoms():
@@ -99,9 +104,17 @@ class MultiScaleGraphBuilder:
             return None
 
     def parse_sdf_ligand(self, sdf_file: str) -> Tuple[Optional[pd.DataFrame], Optional[Chem.Mol]]:
-        """解析SDF文件，提取配体重原子信息。"""
-        mol = Chem.MolFromMolFile(sdf_file, sanitize=True, removeHs=False)
-        if mol is None: return None, None
+        """解析SDF/MOL文件，提取配体重原子信息。"""
+        try:
+            # --- 诊断性文件访问 ---
+            with open(sdf_file, 'r') as f:
+                pass # 仅尝试打开
+            # --- 诊断结束 ---
+            mol = Chem.MolFromMolFile(sdf_file, sanitize=True, removeHs=False)
+            if mol is None: return None, None
+        except Exception as e:
+            print(f"[错误] RDKit解析MOL文件失败: {os.path.basename(sdf_file)}, {e}")
+            return None, None
 
         try:
             mol = Chem.AddHs(mol, addCoords=True)
@@ -228,6 +241,7 @@ class MultiScaleGraphBuilder:
 
     def build_graph(self, complex_id: str, pdb_file: str, sdf_file: str) -> Optional[Data]:
         """构建包含多尺度信息的图对象。"""
+        # 1. 解析分子
         # 1. 解析分子
         protein_df_full = self.parse_protein_with_biopython(pdb_file)
         ligand_df_raw, ligand_mol = self.parse_sdf_ligand(sdf_file)
