@@ -92,7 +92,7 @@ def main():
     
     # --- 模式二: 从原始文件预测 ---
     parser.add_argument("--pdb_file", type=str, default=None, help="Path to a new protein PDB file.")
-    parser.add_argument("--sdf_file", type=str, default=None, help="Path to a new ligand SDF file.")
+    parser.add_argument("--mol_file", type=str, default=None, help="Path to a new ligand MOL file.")
     parser.add_argument("--complex_id", type=str, default="new_complex", help="Name for the new complex.")
     parser.add_argument("--output", type=str, default="top_interactions.png", help="Path to save the output PNG image file.")
     parser.add_argument("--top_k", type=float, default=0.1, help="Percentage of top edges to keep (e.g., 0.1 for 10%).")
@@ -103,11 +103,11 @@ def main():
     print("模型已加载。")
 
     # --- 根据参数决定执行模式 ---
-    if args.pdb_file and args.sdf_file:
+    if args.pdb_file and args.mol_file:
         # 模式二: 从原始文件动态构建图
         print("--- 模式: 从文件预测新复合物 ---")
         print(f"蛋白质 PDB: {args.pdb_file}")
-        print(f"配体 SDF: {args.sdf_file}")
+        print(f"配体 MOL: {args.mol_file}")
 
         # 使用默认配置创建GraphBuilder
         # 注意：这里的配置需要与训练时大致匹配
@@ -120,7 +120,7 @@ def main():
         data_sample = graph_builder.build_graph(
             complex_id=args.complex_id,
             pdb_file=args.pdb_file,
-            sdf_file=args.sdf_file
+            sdf_file=args.mol_file
         )
         
         if data_sample is None:
